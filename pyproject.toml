@@ -22,6 +22,7 @@ dependencies = [
     "networkx",
     "numpy",
     "pandas",
+    "py3Dmol",
     "pypdb",
     "requests",
     "scipy",
@@ -30,6 +31,9 @@ dependencies = [
 [project.optional-dependencies]
 devel = [
     "ruff",
+]
+static-render = [
+    "pymol-open-source",
 ]
 
 [tool.hatch.version]

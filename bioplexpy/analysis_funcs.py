@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import itertools
+import os
 import random
 import re
 from collections import Counter
@@ -10,7 +11,12 @@ import numpy as np
 import pandas as pd
 import requests
 from Bio.PDB import *
+from Bio.PDB.Polypeptide import is_aa
 from scipy.spatial.distance import cdist
+
+# residue names for nucleic acid polymers, used by classify_chain()
+_DNA_RESNAMES = {'DA', 'DC', 'DG', 'DT', 'DI', 'DU'}
+_RNA_RESNAMES = {'A', 'C', 'G', 'U', 'I'}
 
 
 def bioplex2graph(bp_PPI_df):
@@ -561,16 +567,223 @@ def resampling_test_for_uniprot_list(bp_PPI_G, uniprot_list,
                         (float(num_resamples) + 1.0))
     return p_val
 
+def classify_chain(chain):
+    '''
+    Classify a Bio.PDB Chain as 'protein', 'dna', 'rna', or 'other'.
+
+    Classification is based on the majority residue type among the
+    chain's polymer residues (residues with a blank hetero-flag, i.e.
+    excluding waters, ions, and other heteroatom/ligand records).
+
+    Parameters
+    ----------
+    chain: Bio.PDB.Chain.Chain
+
+    Returns
+    -------
+    str
+        One of 'protein', 'dna', 'rna', 'other'. 'other' is returned for
+        chains with no polymer residues (e.g. a chain consisting only of
+        a bound ligand or crystallographic waters) or for chains whose
+        polymer residues are not majority amino acid/DNA/RNA.
+
+    Examples
+    --------
+    # (1) Classify each chain in the CDC45-MCM-GINS helicase structure,
+    #     which includes a DNA chain (chain 'M') -- see classify_pdb_chains()
+    #     for a runnable example using this function under the hood.
+    '''
+    n_aa = n_dna = n_rna = n_total = 0
+    for residue in chain:
+        if residue.id[0] != ' ':
+            continue  # skip waters/ions/ligands (heteroatom records)
+        n_total += 1
+        resname = residue.get_resname().strip()
+        if is_aa(resname, standard=True):
+            n_aa += 1
+        elif resname in _DNA_RESNAMES:
+            n_dna += 1
+        elif resname in _RNA_RESNAMES:
+            n_rna += 1
+
+    if n_total == 0:
+        return 'other'
+    if n_aa / n_total > 0.5:
+        return 'protein'
+    if n_dna / n_total > 0.5:
+        return 'dna'
+    if n_rna / n_total > 0.5:
+        return 'rna'
+    return 'other'
+
+
+def fetch_pdb_structure_file(PDB_ID_structure_i, protein_structure_dir):
+    '''
+    Download a PDB structure, preferring the legacy PDB format but falling
+    back to mmCIF if RCSB doesn't have a legacy file for it.
+
+    RCSB no longer generates legacy .pdb files for a growing share of new
+    depositions (typically larger/newer cryo-EM structures) -- some don't
+    fit the legacy format's hard limits (62 chains, 99999 atoms, 4-digit
+    residue numbers) at all. Every structure on RCSB has an mmCIF file
+    though, so falling back to it (rather than failing outright) means
+    BioPlexPy's structure-based functions keep working on those newer
+    structures. Biopython's MMCIFParser uses the same (author) chain IDs as
+    the legacy PDB format by default, so chain-ID-keyed logic elsewhere
+    (e.g. the SIFTS-based UniProt mappings in list_uniprot_pdb_mappings())
+    is unaffected by which format was actually used.
+
+    Parameters
+    ----------
+    PDB ID: str
+    directory to store PDB file: str
+
+    Returns
+    -------
+    (str, str)
+        (file path, format), where format is 'pdb' or 'mmCif'.
+
+    Examples
+    --------
+    >>> file_path, file_format = fetch_pdb_structure_file('6NMI', '.')
+    Downloading PDB structure '6nmi'...
+    >>> file_format
+    'pdb'
+    '''
+    pdbl = PDBList()
+    pdb_file_path = pdbl.retrieve_pdb_file(PDB_ID_structure_i,
+                                           pdir=protein_structure_dir,
+                                           file_format='pdb',
+                                           overwrite=True)
+    if pdb_file_path and os.path.exists(pdb_file_path):
+        return pdb_file_path, 'pdb'
+
+    cif_file_path = pdbl.retrieve_pdb_file(PDB_ID_structure_i,
+                                           pdir=protein_structure_dir,
+                                           file_format='mmCif',
+                                           overwrite=True)
+    if cif_file_path and os.path.exists(cif_file_path):
+        return cif_file_path, 'mmCif'
+
+    raise FileNotFoundError(
+        f"Could not download structure '{PDB_ID_structure_i}' from RCSB "
+        "in either legacy PDB or mmCIF format.")
+
+
+def _load_pdb_model(PDB_ID_structure_i, protein_structure_dir):
+    '''
+    Download (if needed) and parse a PDB structure, returning its first model.
+
+    Internal helper shared by get_interacting_chains_from_PDB(),
+    classify_pdb_chains(), and get_chain_centroids() so the structure is
+    downloaded/parsed with consistent behavior in all three.
+    '''
+    file_path, file_format = fetch_pdb_structure_file(PDB_ID_structure_i,
+                                                       protein_structure_dir)
+    parser = MMCIFParser(QUIET=True) if file_format == 'mmCif' else PDBParser(QUIET=True)
+    structure = parser.get_structure(PDB_ID_structure_i, file_path)
+    return structure[0]
+
+
+def classify_pdb_chains(PDB_ID_structure_i, protein_structure_dir):
+    '''
+    Classify every chain in a PDB structure as 'protein', 'dna', 'rna',
+    or 'other'.
+
+    Parameters
+    ----------
+    PDB ID: str
+    directory to store PDB file: str
+
+    Returns
+    -------
+    dict
+        Mapping of chain ID -> classification ('protein', 'dna', 'rna',
+        or 'other'), via classify_chain().
+
+    Examples
+    --------
+    # (1) Classify chains in the Ribonuclease P structure, which
+    #     includes an RNA chain ('A', the H1 RNA)
+    >>> chain_types = classify_pdb_chains('6AHR', '.')
+    Downloading PDB structure '6ahr'...
+    >>> chain_types['A']
+    'rna'
+    '''
+    model = _load_pdb_model(PDB_ID_structure_i, protein_structure_dir)
+    return _classify_chains(model)
+
+
+def _classify_chains(model):
+    '''
+    Internal helper: classify every chain in an already-loaded Bio.PDB
+    model. Factored out of classify_pdb_chains() so
+    PDB_to_interacting_chains_uniprot_maps() can reuse a single
+    downloaded/parsed structure instead of re-fetching it.
+    '''
+    return {chain.get_id(): classify_chain(chain) for chain in model}
+
+
+def get_chain_centroids(PDB_ID_structure_i, protein_structure_dir):
+    '''
+    Compute the 3D centroid (mean polymer-atom coordinate) of every
+    protein/DNA/RNA chain in a PDB structure.
+
+    Used to derive a network layout from the structure's real geometry
+    (see get_structure_based_layout() in visualization_funcs.py), rather
+    than an arbitrary layout algorithm, so the network diagram's spatial
+    arrangement reflects how the chains are actually arranged in 3D.
+
+    Parameters
+    ----------
+    PDB ID: str
+    directory to store PDB file: str
+
+    Returns
+    -------
+    dict
+        Mapping of chain ID -> numpy array of shape (3,) (the mean x/y/z
+        coordinate of that chain's polymer atoms). Chains classified as
+        'other' (no polymer residues, e.g. a lone ligand) are omitted.
+
+    Examples
+    --------
+    >>> centroids = get_chain_centroids('6NMI', '.')
+    Downloading PDB structure '6nmi'...
+    >>> sorted(centroids.keys())
+    ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+    >>> centroids['A'].shape
+    (3,)
+    '''
+    model = _load_pdb_model(PDB_ID_structure_i, protein_structure_dir)
+    centroids = {}
+    for chain in model:
+        if classify_chain(chain) == 'other':
+            continue
+        coords = [atom.coord for residue in chain if residue.id[0] == ' '
+                  for atom in residue]
+        if coords:
+            centroids[chain.get_id()] = np.mean(np.vstack(coords), axis=0)
+    return centroids
+
+
 def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, dist_threshold):
     '''
-    Retreive chain pairs that are physically close to eachother from 
+    Retreive chain pairs that are physically close to eachother from
     PDB structure.
-    
-    This function downloads the PDB structure that is specified from the input 
-    PDB ID into the input directory, then computes the pairwise distances 
-    between all atoms for each pair of chains in the structure. A list of 
-    chain pairs that are interacting (have at least a pair of 
+
+    This function downloads the PDB structure that is specified from the input
+    PDB ID into the input directory, then computes the pairwise distances
+    between all atoms for each pair of chains in the structure. A list of
+    chain pairs that are interacting (have at least a pair of
     atoms < dist_threshold angstroms apart) is returned.
+
+    Only polymer atoms (standard amino acid or nucleic acid residues) are
+    considered; atoms from waters, ions, and other bound heteroatoms/ligands
+    are excluded from the distance calculation, and chains with no polymer
+    residues (e.g. a lone ligand or water "chain") are skipped entirely.
+    This means protein and nucleic acid (DNA/RNA) chains are both eligible
+    to be reported as interacting.
 
     Parameters
     ----------
@@ -581,32 +794,34 @@ def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, d
     Returns
     -------
     Interacting Chains
-        List of chain pairs from PDB structure that have at least 
-        one pair of atoms located < distance threshold apart.
+        List of chain pairs from PDB structure that have at least
+        one pair of polymer atoms located < distance threshold apart.
 
     Examples
     --------
     # (1) Obtain list of interacting chains from 6YW7 structure
     >>> interacting_chains_list = get_interacting_chains_from_PDB('6YW7', '.', 6)
-    Downloading PDB structure '6YW7'...
+    Downloading PDB structure '6yw7'...
     >>> interacting_chains_list
     [['A', 'D'], ['A', 'E'], ['A', 'B'], ['D', 'F'], ['B', 'F'], ['B', 'G'], ['F', 'G'], ['F', 'C'], ['G', 'C']]
     '''
-    # download structure from PDB
-    pdbl = PDBList()
-    PBD_file_path = pdbl.retrieve_pdb_file(PDB_ID_structure_i, 
-                                           pdir=protein_structure_dir, 
-                                           file_format='pdb', 
-                                           overwrite=True)
+    model = _load_pdb_model(PDB_ID_structure_i, protein_structure_dir)
+    return _direct_interaction_chain_pairs(model, dist_threshold)
 
-    # create a structure object
-    parser = PDBParser()
-    structure = parser.get_structure(PDB_ID_structure_i, PBD_file_path)
 
-    model = structure[0]
-    chain_IDs = [chain.get_id() for chain in model] # get a list of all chains
+def _direct_interaction_chain_pairs(model, dist_threshold):
+    '''
+    Internal helper: compute directly-interacting chain pairs for an
+    already-loaded Bio.PDB model. Factored out of
+    get_interacting_chains_from_PDB() so PDB_to_interacting_chains_uniprot_maps()
+    can reuse a single downloaded/parsed structure instead of re-fetching it.
+    '''
+    # only consider chains that are (at least in part) protein or nucleic
+    # acid polymers; pure ligand/water "chains" are not meaningful subunits
+    chain_IDs = [chain.get_id() for chain in model
+                 if classify_chain(chain) != 'other']
 
-    # we want to test every pair of chains to see if they have any atoms 
+    # we want to test every pair of chains to see if they have any atoms
     # that are < 6 angstroms in distance
     possible_chain_pairs = list(itertools.combinations(chain_IDs, 2))
 
@@ -618,18 +833,19 @@ def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, d
         chain_i = model[chain_i_id]
         chain_j = model[chain_j_id]
 
-        # get all atoms from each chain, 'A' stands for ATOM
-        atom_list_i = Selection.unfold_entities(chain_i, "A")
-        atom_list_j = Selection.unfold_entities(chain_j, "A")
+        # get polymer atoms from each chain (excludes waters/ions/ligands,
+        # 'A' stands for ATOM in unfold_entities' entity-level codes)
+        atom_list_i = [atom for atom in Selection.unfold_entities(chain_i, "A")
+                       if atom.get_parent().id[0] == ' ']
+        atom_list_j = [atom for atom in Selection.unfold_entities(chain_j, "A")
+                       if atom.get_parent().id[0] == ' ']
+
+        if not atom_list_i or not atom_list_j:
+            continue
 
         # get the coordinates for the atom in each chain
-        atom_coords_i = ([atom_list_i[k].coord 
-                          for k in range(0,len(atom_list_i))])
-        atom_coords_i = np.vstack(atom_coords_i)
-
-        atom_coords_j = ([atom_list_j[k].coord 
-                          for k in range(0,len(atom_list_j))])
-        atom_coords_j = np.vstack(atom_coords_j)
+        atom_coords_i = np.vstack([atom.coord for atom in atom_list_i])
+        atom_coords_j = np.vstack([atom.coord for atom in atom_list_j])
 
         # compute pairwise distances betweeen all atoms from different chains
         dists = cdist(atom_coords_i, atom_coords_j)
@@ -637,7 +853,7 @@ def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, d
         # if a pair of atoms < dist_threshold angstroms apart, store as interacting chains
         if np.sum(dists < dist_threshold) >= 1:
             chain_pairs_direct_interaction.append([chain_i_id, chain_j_id])
-        
+
     return chain_pairs_direct_interaction
 
 def make_request(url, mode, pdb_id):
@@ -794,33 +1010,44 @@ def PDB_chains_to_uniprot(interacting_chains_list,
     
     This function takes the list of interacting chains from function
     get_interacting_chains_from_PDB() and the chain to UniProt mappings
-    from function list_uniprot_pdb_mappings() and returns a list of 
+    from function list_uniprot_pdb_mappings() and returns a list of
     interacting chains using UniProt IDs.
-    
+
+    Because the returned pairs are UniProt-labeled (one node per protein,
+    not per chain), two chains of a homo-oligomer that map to the same
+    UniProt ID produce a self-pair (e.g. a contact between chain I and
+    chain J of the same protein) rather than a distinct-protein edge;
+    such self-pairs are dropped, and duplicate pairs arising when two
+    different chain-pairs resolve to the same UniProt-UniProt pair are
+    collapsed to one. This means a direct contact that exists via only
+    one of several chains mapping to the same UniProt ID is
+    indistinguishable from one that exists via all of them.
+
     Parameters
     ----------
     Interacting Chains: list
     Chain to UniProt Map: dict
-    
+
     Returns
     -------
     Interacting Chains
-        List of interacting chains using UniProt IDs
-    
+        List of unique, non-self interacting UniProt ID pairs.
+
     Examples
     --------
     # (1) Obtain list of interacting chains from 6YW7 structure
     # (2) Obtain a mapping of PDB ID 6YW7 chains to UniProt IDs
-    # (3) Obtain list of interacting chains from 6YW7 
-    #     structure using UniProt IDs 
+    # (3) Obtain list of interacting chains from 6YW7
+    #     structure using UniProt IDs
     >>> interacting_chains_list = get_interacting_chains_from_PDB('6YW7', '.', 6)
-    Downloading PDB structure '6YW7'...
-    >>> chain_to_UniProt_mapping_dict = list_uniprot_pdb_mappings('6YW7') 
+    Downloading PDB structure '6yw7'...
+    >>> chain_to_UniProt_mapping_dict = list_uniprot_pdb_mappings('6YW7')
     >>> interacting_UniProt_IDs = PDB_chains_to_uniprot(interacting_chains_list, chain_to_UniProt_mapping_dict)
     >>> sorted(interacting_UniProt_IDs)
     [['O15144', 'P59998'], ['O15511', 'Q92747'], ['P59998', 'O15511'], ['P59998', 'Q92747'], ['P61158', 'O15144'], ['P61158', 'O15145'], ['P61158', 'P61160'], ['P61160', 'O15511'], ['P61160', 'P59998']]
     '''
     interacting_UniProt_IDs = []
+    seen_pairs = set()
     for interacting_chain_pair_i in interacting_chains_list:
 
         # get UniProt IDs that map to each chain ID
@@ -829,57 +1056,84 @@ def PDB_chains_to_uniprot(interacting_chains_list,
         chain_j_UniProts = (
             chain_to_UniProt_mapping_dict[interacting_chain_pair_i[1]])
 
-        # store every pair of UniProt IDs that correspond 
+        # store every pair of UniProt IDs that correspond
         # to the interacting chains
         for chain_i_UniProt_ID in chain_i_UniProts:
             for chain_j_UniProt_ID in chain_j_UniProts:
+
+                # skip self-pairs (contact between two chains of the same
+                # homo-oligomeric protein -- not representable as a
+                # distinct-protein edge) and duplicate pairs
+                if chain_i_UniProt_ID == chain_j_UniProt_ID:
+                    continue
+                pair_key = frozenset((chain_i_UniProt_ID, chain_j_UniProt_ID))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+
                 interacting_UniProt_IDs.append(
                     [chain_i_UniProt_ID,chain_j_UniProt_ID])
-                
+
     return interacting_UniProt_IDs
 
-def PDB_to_interacting_chains_uniprot_maps(PDB_ID, 
-                                           protein_structure_dir, 
+def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
+                                           protein_structure_dir,
                                            interact_dist_threshold):
     '''
-    Get interacting chains from PDB structure mapped to UniProt IDs and 
+    Get interacting chains from PDB structure mapped to UniProt IDs and
     PDB chain to UniProt mappings.
-    
-    This is a wrapper function for functions 
+
+    This is a wrapper function for functions
     (1) get_interacting_chains_from_PDB(),
     (2) list_uniprot_pdb_mappings(), and
-    (3) PDB_chains_to_uniprot() 
-    to get a list of interacting chains from PDB structure using UniProt labels 
+    (3) PDB_chains_to_uniprot()
+    to get a list of interacting chains from PDB structure using UniProt labels
     and the chain-to-UniProt mapping for this PDB structure.
-    
+
+    Nucleic acid chains (DNA/RNA) have no UniProt ID: SIFTS only maps
+    protein chains. Such chains are instead labeled with a synthetic ID
+    of the form 'RNA:<chain>' / 'DNA:<chain>' (e.g. 'RNA:A') so that they
+    still appear as nodes in the returned interaction list rather than
+    raising a KeyError or being silently dropped.
+
     Parameters
     ----------
     PDB ID: str
     directory to store PDB file: str
     distance threshold: int
-    
+
     Returns
     -------
     Chain to UniProt Map
-        Dictionary of PDB ID chain to UniProt ID mappings
+        Dictionary of PDB ID chain to UniProt/synthetic ID mappings
     Interacting Chains
-        List of interacting chains using UniProt IDs
-    
+        List of interacting chains using UniProt/synthetic IDs
+    Chain Types
+        Dictionary of PDB ID chain to classification
+        ('protein', 'dna', 'rna', or 'other'), from classify_pdb_chains()
+
     Examples
     --------
-    >>> (chain_to_UniProt_mapping_dict, interacting_UniProt_IDs) = PDB_to_interacting_chains_uniprot_maps('6NMI', '.', 6)
-    Downloading PDB structure '6NMI'...
+    >>> (chain_to_UniProt_mapping_dict, interacting_UniProt_IDs, chain_types) = PDB_to_interacting_chains_uniprot_maps('6NMI', '.', 6)
+    Downloading PDB structure '6nmi'...
     '''
-    # get list of chain pairs that interact in PDB structure 
-    interacting_chains_list = get_interacting_chains_from_PDB(PDB_ID, 
-                                                    protein_structure_dir, 
-                                                    interact_dist_threshold)
-    
-    # get chain > UniProt ID mappings for this PDB structure
-    chain_to_UniProt_mapping_dict = list_uniprot_pdb_mappings(PDB_ID)
-    
+    # load the structure once and reuse it for both the direct-interaction
+    # search and the chain classification (avoids downloading it twice)
+    model = _load_pdb_model(PDB_ID, protein_structure_dir)
+    interacting_chains_list = _direct_interaction_chain_pairs(model, interact_dist_threshold)
+    chain_types = _classify_chains(model)
+
+    # get chain > UniProt ID mappings for this PDB structure (protein chains only)
+    chain_to_UniProt_mapping_dict = list_uniprot_pdb_mappings(PDB_ID) or {}
+
+    # nucleic acid chains have no UniProt ID (SIFTS is protein-only); give
+    # them a synthetic, still-unique label so downstream lookups don't KeyError
+    for chain_id, chain_type in chain_types.items():
+        if chain_id not in chain_to_UniProt_mapping_dict and chain_type in ('dna', 'rna'):
+            chain_to_UniProt_mapping_dict[chain_id] = [f'{chain_type.upper()}:{chain_id}']
+
     # get list of chains pairs that interact in PDB structure using UniProts
-    interacting_UniProt_IDs = PDB_chains_to_uniprot(interacting_chains_list, 
+    interacting_UniProt_IDs = PDB_chains_to_uniprot(interacting_chains_list,
                                                 chain_to_UniProt_mapping_dict)
 
-    return [chain_to_UniProt_mapping_dict, interacting_UniProt_IDs]
+    return [chain_to_UniProt_mapping_dict, interacting_UniProt_IDs, chain_types]

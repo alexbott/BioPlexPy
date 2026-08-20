@@ -1,9 +1,15 @@
 #!/usr/bin/env python
 
 import itertools
+import os
+import tempfile
 
+import matplotlib.colors
+import matplotlib.image as mpimg
+import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import py3Dmol
 
 
 def display_PPI_network_for_complex(ax, bp_PPI_df, Corum_DF, Complex_ID, 
@@ -498,4 +504,1157 @@ def display_PPI_network_match_PDB(ax, chain_to_UniProt_mapping_dict,
 
     # return node position layout, list of edges detected,
     # and number of possible edges
-    return [bp_structure_i_G.edges, float(len(bp_structure_i_G_complete.edges))]    
+    return [bp_structure_i_G.edges, float(len(bp_structure_i_G_complete.edges))]
+
+
+# ---------------------------------------------------------------------------
+# Functions below reproduce Figure 2F-H of Huttlin et al. 2021 (Cell
+# 184:3022-3040): for a given PDB structure, a chain-colored 3D render
+# (get_chain_color_palette + render_pdb_structure_py3Dmol), the PDB-derived
+# direct interaction network colored to match (display_PDB_direct_interaction_network),
+# that same network recolored by BioPlex AP-MS detection
+# (display_BioPlex_direct_interactions), and the full BioPlex subnetwork
+# across both 293T and HCT116 cell lines
+# (display_All_BioPlex_interactions_two_cell_lines). render_figure2_panels()
+# assembles the three network panels into one figure and returns the
+# py3Dmol structure view alongside it.
+# ---------------------------------------------------------------------------
+
+# Mol*'s default "Chain ID" color theme -- the viewer RCSB uses at
+# rcsb.org. A fixed 25-color qualitative palette (ColorBrewer Dark2 +
+# Set1 + Set2 concatenated, Mol*'s 'many-distinct' list), assigned to
+# chains by their order of first appearance in the structure (not a
+# fixed per-letter table). See `chain-id.ts` and `lists.ts` in
+# github.com/molstar/molstar/tree/master/src/mol-{theme,util/color}.
+# Used as the canonical source of chain colors, rather than an arbitrary
+# palette, so the interactive structure render and the network panels
+# both show the colors a plain view of the structure on rcsb.org would.
+_MOLSTAR_MANY_DISTINCT = [
+    '#1b9e77', '#d95f02', '#7570b3', '#e7298a', '#66a61e', '#e6ab02', '#a6761d', '#666666',
+    '#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf', '#999999',
+    '#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f', '#e5c494', '#b3b3b3',
+]
+
+
+def get_chain_color_palette(chain_ids):
+    '''
+    Assign each chain in a structure the color it gets under Mol*'s
+    default "Chain ID" coloring (the viewer RCSB uses at rcsb.org) --
+    _MOLSTAR_MANY_DISTINCT assigned by each chain's order of first
+    appearance in the structure, cycling if there are more than 25
+    chains, exactly matching Mol*'s own color-assignment logic.
+
+    Parameters
+    ----------
+    chain_ids: list of str
+        Chain IDs in the order they appear in the structure (e.g. dict
+        keys from classify_pdb_chains(), which preserves file/parse
+        order). Do not pre-sort this list -- order determines color
+        assignment, matching structures to what rcsb.org shows requires
+        our parsed chain order to agree with theirs.
+
+    Returns
+    -------
+    dict
+        Mapping of chain ID -> hex color string.
+
+    Examples
+    --------
+    >>> palette = get_chain_color_palette(['A', 'B'])
+    >>> palette['A']
+    '#1b9e77'
+    >>> palette['A'] == palette['B']
+    False
+    '''
+    return {chain_id: _MOLSTAR_MANY_DISTINCT[i % len(_MOLSTAR_MANY_DISTINCT)]
+            for i, chain_id in enumerate(chain_ids)}
+
+
+def get_uniprot_color_palette(chain_to_UniProt_mapping_dict, chain_color_palette):
+    '''
+    Propagate a chain_id -> color palette (e.g. from get_chain_color_palette())
+    to a UniProt/synthetic-ID -> color palette, so structure and network
+    panels can share identical colors for the same physical chain.
+
+    Parameters
+    ----------
+    Chain to UniProt Map: dict
+    Chain Color Palette: dict
+
+    Returns
+    -------
+    dict
+        Mapping of UniProt (or synthetic 'RNA:'/'DNA:') ID -> hex color.
+        If a UniProt ID maps to multiple chains (e.g. the two copies of a
+        homo-oligomeric subunit, which get different default chain colors
+        in the 3D render since they really are different chains), the
+        alphabetically-first chain ID's color is used for that protein's
+        single network node, deterministically (chain_to_UniProt_mapping_dict
+        is built from a set() internally, so its iteration order is not
+        itself stable across runs/interpreters).
+    '''
+    uniprot_color = {}
+    for chain_id in sorted(chain_to_UniProt_mapping_dict.keys()):
+        color = chain_color_palette.get(chain_id, '#b3b3b3')
+        for id_i in chain_to_UniProt_mapping_dict[chain_id]:
+            uniprot_color.setdefault(id_i, color)
+    return uniprot_color
+
+
+def _relax_overlapping_nodes(pos, min_separation, iterations=200, step=0.5):
+    '''
+    Internal helper: nudge apart only the specific node pairs sitting
+    closer together than min_separation, by directly displacing each
+    such pair along their connecting vector. Unlike a full force-directed
+    layout (e.g. nx.spring_layout with no edges), this applies no global
+    repulsion between well-separated nodes -- since every node in a
+    "no edges" spring layout still repels every other node each
+    iteration, that approach pushes the *entire* layout toward a
+    uniformly-spaced ring, destroying the real depth information the PCA
+    projection captured (a node near the projection's center genuinely
+    means its 3D centroid is near the structure's center of mass along
+    those two axes). Here, nodes that aren't in collision are never
+    touched at all.
+    '''
+    node_ids = list(pos.keys())
+    n = len(node_ids)
+    if n < 2:
+        return pos
+
+    coords = np.array([pos[node_id] for node_id in node_ids], dtype=float)
+    for _ in range(iterations):
+        moved = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                delta = coords[i] - coords[j]
+                dist = np.linalg.norm(delta)
+                if dist < min_separation:
+                    moved = True
+                    if dist < 1e-9:
+                        delta = np.array([1.0, 0.0])
+                        dist = 1.0
+                    push = (min_separation - dist) / 2.0 * step * (delta / dist)
+                    coords[i] += push
+                    coords[j] -= push
+        if not moved:
+            break
+
+    return {node_id: tuple(xy) for node_id, xy in zip(node_ids, coords)}
+
+
+def _protein_centroids(chain_to_UniProt_mapping_dict, chain_centroids):
+    '''
+    Internal helper: average chain centroids per UniProt/synthetic ID, so
+    chains of a homo-oligomer collapse to the one node that represents
+    them in the network. Shared by get_structure_based_layout() and
+    render_figure2_panels_static() (via _prepare_figure2_inputs()) so the
+    PCA rotation used to pre-orient the structure render is computed from
+    the exact same point set as the network layout.
+
+    Returns
+    -------
+    tuple
+        (node_ids, centroids) -- node_ids sorted list of str, centroids
+        an (N, 3) array in the same order.
+    '''
+    id_coords = {}
+    for chain_id, ids in chain_to_UniProt_mapping_dict.items():
+        if chain_id not in chain_centroids:
+            continue
+        for id_i in ids:
+            id_coords.setdefault(id_i, []).append(chain_centroids[chain_id])
+
+    node_ids = sorted(id_coords.keys())
+    centroids = np.vstack([np.mean(id_coords[node_id], axis=0) for node_id in node_ids])
+    return node_ids, centroids
+
+
+def _pca_rotation_matrix(points):
+    '''
+    Internal helper: a proper (right-handed, det=+1) 3x3 rotation matrix
+    whose rows are points' top-3 principal component directions, plus
+    the centroid mean used to center them. Applying `rotation @ (p - mean)`
+    to any point `p` puts PC1 on the new x-axis, PC2 on y, PC3 on z --
+    the same rotation used both to build the 2D network layout (via just
+    the first two rows) and, in render_pdb_structure_static(), to
+    pre-rotate the actual structure's atom coordinates before PyMOL ever
+    sees them. Doing both from this one shared matrix is what keeps the
+    structure panel and the network panels' orientation in agreement --
+    np.linalg.svd's principal-component *signs* are otherwise arbitrary
+    (unrelated runs/axes can each independently come out flipped), and
+    PyMOL's own cmd.orient() picks a completely independent camera angle,
+    so without sharing one matrix the two panels have no reason to agree
+    and can easily end up as mirror images of each other.
+
+    Parameters
+    ----------
+    points: (N, 3) array
+
+    Returns
+    -------
+    tuple
+        (rotation, mean) -- rotation a (3, 3) array, mean a (3,) array.
+    '''
+    mean = points.mean(axis=0)
+    centered = points - mean
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    rotation = vt[:3].copy()
+    if rotation.shape[0] < 3:
+        # fewer than 3 independent directions in the data (degenerate,
+        # e.g. <3 points): complete to a full orthonormal basis
+        completion, _ = np.linalg.qr(np.vstack([rotation, np.eye(3)]).T)
+        rotation = completion.T[:3]
+    if np.linalg.det(rotation) < 0:
+        # SVD gives no handedness guarantee; flip the axis least likely
+        # to matter visually (PC3, the "into the screen" depth axis, not
+        # used by the 2D network layout at all) rather than PC1/PC2
+        rotation[2] *= -1
+    return rotation, mean
+
+
+def get_structure_based_layout(chain_to_UniProt_mapping_dict, chain_centroids,
+                               scale=1.0, min_separation=0.15):
+    '''
+    Derive a 2D network layout from a structure's real 3D geometry, via
+    PCA, instead of an arbitrary layout algorithm (e.g. a circle) --
+    so proteins/nucleic acids that are spatially clustered in the actual
+    structure end up visually clustered in the network diagram too.
+
+    Each node's 3D position is the average centroid of the chain(s)
+    mapping to it (chains of a homo-oligomer are averaged together).
+    Those 3D positions are then projected onto their two dominant axes
+    of variation (the first two principal components), which is the 2D
+    plane that best preserves the real relative distances between nodes.
+    Any nodes left overlapping (or nearly so) by that projection -- e.g.
+    two chains whose centroids happen to be close along both PCA axes --
+    are then nudged apart by a local, pairwise collision-resolution pass
+    (see _relax_overlapping_nodes()) that only moves the specific
+    colliding nodes, so labels stay legible without discarding the real
+    spatial arrangement (e.g. distance from center) of every other node.
+
+    render_pdb_structure_static() pre-rotates the structure itself by
+    this same PCA basis (see _pca_rotation_matrix()) before rendering, so
+    the structure panel and this layout end up in visual agreement rather
+    than each picking an independent, possibly mirrored orientation.
+
+    Parameters
+    ----------
+    Chain to UniProt Map: dict
+    Chain Centroids: dict (from get_chain_centroids())
+    scale: float (optional)
+        Layout is normalized so the furthest node from the origin is at
+        this distance, to match the scale nx.circular_layout() produces
+        (~1.0) so existing node_size/edge_width defaults still look right.
+    min_separation: float (optional)
+        Minimum node-node distance (in the same units as scale) below
+        which the anti-overlap relaxation kicks in.
+
+    Returns
+    -------
+    dict
+        Mapping of UniProt/synthetic ID -> (x, y) tuple, usable directly
+        as the node_pos argument to display_PDB_direct_interaction_network().
+    '''
+    node_ids, centroids = _protein_centroids(chain_to_UniProt_mapping_dict, chain_centroids)
+    rotation, mean = _pca_rotation_matrix(centroids)
+    projected = (centroids - mean) @ rotation[:2].T
+
+    max_extent = np.abs(projected).max()
+    if max_extent > 0:
+        projected = projected / max_extent * scale
+
+    pos = {node_id: tuple(xy) for node_id, xy in zip(node_ids, projected)}
+    return _relax_overlapping_nodes(pos, min_separation=min_separation)
+
+
+def _draw_outside_labels(ax, G, node_pos, labels, font_size, node_size,
+                         padding_points=6):
+    '''
+    Internal helper: draw node labels positioned just outside each node,
+    offset radially outward from the graph's centroid -- matching Figure
+    2's own label style (name beside/above the node, not overlapping it),
+    rather than the earlier in-node placement.
+
+    Since labels now sit on the plot's white background rather than on
+    the node's own fill color, they're drawn in plain black rather than
+    the previous per-node white/black contrast choice (which only made
+    sense for text drawn on top of a colored node).
+
+    The offset is specified in points (via matplotlib's `annotate(...,
+    textcoords='offset points')`) rather than as a fraction of the
+    layout's data-coordinate spread. Those are unrelated quantities: node
+    markers (`node_size`) are a fixed size in points^2 regardless of how
+    spread out or compact the layout is, so a data-space fraction can end
+    up smaller than the node's own on-screen radius for a tight layout
+    with large nodes -- which put labels *inside* the circle instead of
+    outside it. Points-based offset is guaranteed to clear the node by
+    `padding_points` regardless of the layout's scale or density.
+
+    Two nodes close enough together that their labels both clear their own
+    node but still land on top of *each other* (e.g. two touching nodes
+    whose outward directions from the centroid are nearly parallel) are
+    resolved separately, by _resolve_label_collisions() -- call that
+    *after* fig.tight_layout(), not here: tight_layout() can still resize
+    / reposition this axes within the figure, which would invalidate any
+    bounding-box measurements taken before it runs.
+
+    Parameters
+    ----------
+    node_size: int
+        Same value passed to nx.draw_networkx_nodes() for these nodes
+        (matplotlib scatter marker area, in points^2) -- used to compute
+        each label's clearance from its node's actual on-screen radius.
+    padding_points: float (optional)
+        Extra gap beyond the node's edge, in points.
+    '''
+    positions = np.array(list(node_pos.values()))
+    centroid = positions.mean(axis=0)
+    node_radius_points = np.sqrt(node_size / np.pi)
+    offset_points = node_radius_points + padding_points
+
+    for node_i, (x, y) in node_pos.items():
+        direction = np.array([x, y]) - centroid
+        norm = np.linalg.norm(direction)
+        unit = direction / norm if norm > 1e-9 else np.array([0.0, 1.0])
+        ax.annotate(labels.get(node_i, node_i), xy=(x, y), xycoords='data',
+                   xytext=(unit[0] * offset_points, unit[1] * offset_points),
+                   textcoords='offset points', ha='center', va='center',
+                   fontsize=font_size, fontweight='bold', color='black')
+    # node/edge collections don't include label text in matplotlib's
+    # autoscaling, so without this the outward-offset labels nearest the
+    # plot edge can get clipped by the axes boundary
+    ax.margins(0.2)
+
+
+def _resolve_label_collisions(ax, node_size, iterations=60, pixel_step=3.0,
+                              min_gap_points=6.0):
+    '''
+    Nudge apart any of this axes' label bounding boxes that overlap each
+    other, or that overlap a node's own circle, using the figure's actual
+    renderer to get each label's real rendered extent (font/string-width-
+    accurate, unlike a fixed data- or point-distance heuristic). Operates
+    on the Annotation objects _draw_outside_labels() already added to
+    `ax` (via `ax.texts`, all created with textcoords='offset points',
+    anchored with xycoords='data') -- pushes are applied by directly
+    adjusting each annotation's `.xyann` (its points-offset from its
+    anchor), converting the pixel-space push via the figure's dpi.
+
+    The label-vs-node check exists because clearing a node by
+    `node_radius + padding` (as _draw_outside_labels() does) is only
+    correct if the label has no width of its own -- in reality the text
+    extends roughly its own half-width *back toward the node* whenever
+    the offset direction is close to horizontal (since these labels are
+    horizontal strings), which for a wide label/small padding can still
+    land inside the node's circle. Checking every label against every
+    node's actual on-screen circle (not just its own) is a real
+    node-radius-vs-rendered-text-bbox rectangle/circle collision test,
+    robust to label text length, rather than trying to precompute a
+    "safe enough" offset per label ahead of time.
+
+    A visible gap is required, not just zero overlap: text glyphs carry
+    some visual weight beyond their precise bounding box (antialiasing,
+    letterforms like descenders), so two boxes that are technically
+    non-overlapping by a pixel or two can still read as touching.
+
+    Must be called after fig.tight_layout() (or anything else that can
+    still resize/reposition `ax` within the figure) -- bounding boxes
+    measured before that wouldn't reflect the final saved figure.
+
+    Parameters
+    ----------
+    node_size: int
+        Same value passed to nx.draw_networkx_nodes() -- used to compute
+        each node's on-screen radius for the label-vs-node check.
+    '''
+    annotations = list(ax.texts)
+    if not annotations:
+        return
+
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    points_per_pixel = 72.0 / fig.dpi
+    min_gap_pixels = min_gap_points / points_per_pixel
+    node_radius_pixels = np.sqrt(node_size / np.pi) / points_per_pixel
+    # every annotation here was created via ax.annotate(..., xy=node_pos,
+    # xycoords='data'), so .xy is that node's data-space anchor
+    node_centers_px = [ax.transData.transform(ann.xy) for ann in annotations]
+
+    def push(ann, direction_px):
+        norm = np.linalg.norm(direction_px)
+        unit = direction_px / norm if norm > 1e-6 else np.array([1.0, 0.0])
+        delta_points = unit * pixel_step * points_per_pixel
+        ann.xyann = (ann.xyann[0] + delta_points[0], ann.xyann[1] + delta_points[1])
+
+    for _ in range(iterations):
+        boxes = [ann.get_window_extent(renderer) for ann in annotations]
+        padded = [b.padded(min_gap_pixels / 2) for b in boxes]
+        moved = False
+
+        for i in range(len(annotations)):
+            for j in range(i + 1, len(annotations)):
+                if not padded[i].overlaps(padded[j]):
+                    continue
+                moved = True
+                ci = np.array([(boxes[i].x0 + boxes[i].x1) / 2, (boxes[i].y0 + boxes[i].y1) / 2])
+                cj = np.array([(boxes[j].x0 + boxes[j].x1) / 2, (boxes[j].y0 + boxes[j].y1) / 2])
+                push(annotations[i], ci - cj)
+                push(annotations[j], cj - ci)
+
+        for i, box in enumerate(boxes):
+            for node_center in node_centers_px:
+                nearest = np.array([min(max(node_center[0], box.x0), box.x1),
+                                    min(max(node_center[1], box.y0), box.y1)])
+                dist = np.linalg.norm(nearest - node_center)
+                if dist >= node_radius_pixels + min_gap_pixels / 2:
+                    continue
+                moved = True
+                box_center = np.array([(box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2])
+                push(annotations[i], box_center - node_center)
+
+        if not moved:
+            break
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+
+
+def _style_nucleic_acid_nodes(nodes, G, id_type, node_color_map,
+                              protein_linewidth=1.5, nucleic_acid_linewidth=2.0):
+    '''
+    Internal helper: redraw DNA/RNA nodes as hollow (white) circles with a
+    dashed outline, matching Figure 2's own convention (e.g. the H1 RNA
+    node in panel G, the DNA node in panel H) of dashed styling for
+    anything protein-nucleic acid -- not just the edges connecting to it,
+    but the nucleic acid node itself. Protein nodes are left as solid
+    filled circles.
+
+    Parameters
+    ----------
+    nodes: matplotlib.collections.PathCollection (from nx.draw_networkx_nodes())
+    G: networkx.Graph
+    id_type: dict (from _id_type_map())
+    node_color_map: list
+        The fill colors originally passed to nx.draw_networkx_nodes(), in
+        G.nodes order -- used here to know which entries to leave alone.
+    '''
+    facecolors, linestyles, linewidths = [], [], []
+    for color, node_i in zip(node_color_map, G.nodes):
+        if id_type.get(node_i) != 'protein':
+            facecolors.append(matplotlib.colors.to_rgba('white'))
+            linestyles.append('dashed')
+            linewidths.append(nucleic_acid_linewidth)
+        else:
+            facecolors.append(matplotlib.colors.to_rgba(color))
+            linestyles.append('solid')
+            linewidths.append(protein_linewidth)
+
+    nodes.set_facecolor(facecolors)
+    nodes.set_linestyle(linestyles)
+    nodes.set_linewidth(linewidths)
+
+
+def _id_type_map(chain_to_UniProt_mapping_dict, chain_types):
+    '''
+    Internal helper: build a UniProt/synthetic-ID -> chain type
+    ('protein'/'dna'/'rna') mapping from a chain-to-UniProt map and a
+    chain-to-type map (e.g. from classify_pdb_chains()).
+    '''
+    id_type = {}
+    for chain_id, ids in chain_to_UniProt_mapping_dict.items():
+        chain_type = chain_types.get(chain_id, 'protein')
+        for id_i in ids:
+            id_type[id_i] = chain_type
+    return id_type
+
+
+def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_palette,
+                                 width=400, height=400, cartoon_style='cartoon'):
+    '''
+    Render a PDB structure interactively with py3Dmol, colored by chain.
+
+    This is Figure 2's column 1 (structure colored by chain). Pass it the
+    same chain_color_palette (from get_chain_color_palette()) used to
+    color the network panels, so the 3D render and the network node
+    colors match. Downloads the structure into protein_structure_dir if
+    it isn't already there.
+
+    Parameters
+    ----------
+    PDB ID: str
+    directory to store PDB file: str
+    Chain Color Palette: dict
+    width: int (optional)
+    height: int (optional)
+    cartoon_style: str (optional)
+        py3Dmol style keyword, e.g. 'cartoon' or 'stick'.
+
+    Returns
+    -------
+    py3Dmol.view
+        Call .show() on this in a Jupyter notebook to render it.
+    '''
+    from bioplexpy.analysis_funcs import fetch_pdb_structure_file
+    pdb_file_path, file_format = fetch_pdb_structure_file(PDB_ID, protein_structure_dir)
+
+    with open(pdb_file_path) as pdb_file:
+        pdb_data = pdb_file.read()
+
+    view = py3Dmol.view(width=width, height=height)
+    view.addModel(pdb_data, 'cif' if file_format == 'mmCif' else 'pdb')
+    # clear 3Dmol.js's default per-atom style so any chain missing from
+    # chain_color_palette renders invisible rather than in a default style
+    view.setStyle({}, {})
+    for chain_id, color in chain_color_palette.items():
+        view.setStyle({'chain': chain_id},
+                      {cartoon_style: {'color': matplotlib.colors.to_hex(color)}})
+    view.zoomTo()
+    return view
+
+
+def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
+    interacting_UniProt_IDs, chain_types, node_color_palette, node_size,
+    edge_width, node_font_size=10, node_pos=None, labels=None,
+    edge_color='0.3'):
+    '''
+    Display the PDB-derived direct interaction network for a structure
+    (Figure 2, column 2): nodes colored to match the structure's chain
+    colors; solid edges for protein-protein direct contacts (<threshold
+    Angstroms apart, per get_interacting_chains_from_PDB()); dashed edges
+    for protein-nucleic acid direct contacts. DNA/RNA nodes themselves are
+    drawn as hollow circles with a dashed outline (matching the dashed-line
+    convention used for their edges), rather than solid filled circles.
+
+    Parameters
+    ----------
+    ax object to draw on: Matplotlib Axes
+    Chain to UniProt Map: dict
+    Interacting UniProt/synthetic IDs: list (from PDB_chains_to_uniprot())
+    Chain Types: dict (from classify_pdb_chains())
+    Node Color Palette: dict (e.g. from get_uniprot_color_palette())
+    Size of Nodes in Network: int
+    Width of Edges in Network: float
+    Size of font for Node Labels: int (optional)
+    Networkx Position of Nodes: dict (optional, computed if not given)
+    Node Labels: dict (optional, defaults to the node IDs themselves)
+    Color of edges: str (optional)
+
+    Returns
+    -------
+    Node Positions
+        Dictionary of Node Positions in NetworkX layout, for reuse by
+        display_BioPlex_direct_interactions() so both panels share a layout.
+    '''
+    id_type = _id_type_map(chain_to_UniProt_mapping_dict, chain_types)
+    all_ids = sorted({id_i for ids in chain_to_UniProt_mapping_dict.values() for id_i in ids})
+
+    G = nx.Graph()
+    G.add_nodes_from(all_ids)
+    G.add_edges_from(interacting_UniProt_IDs)
+
+    if node_pos is None:
+        node_pos = nx.circular_layout(G)
+
+    solid_edges = [(a, b) for a, b in G.edges
+                   if id_type.get(a) == 'protein' and id_type.get(b) == 'protein']
+    dashed_edges = [(a, b) for a, b in G.edges if (a, b) not in solid_edges]
+
+    if solid_edges:
+        edges = nx.draw_networkx_edges(G, node_pos, edgelist=solid_edges,
+                                       width=edge_width, style='solid', ax=ax)
+        edges.set_edgecolor(edge_color)
+    if dashed_edges:
+        edges = nx.draw_networkx_edges(G, node_pos, edgelist=dashed_edges,
+                                       width=edge_width, style='dashed', ax=ax)
+        edges.set_edgecolor(edge_color)
+
+    node_color_map = [node_color_palette.get(n, (0.7, 0.7, 0.7, 1.0)) for n in G.nodes]
+    nodes = nx.draw_networkx_nodes(G, node_pos, node_size=node_size,
+                                   node_color=node_color_map, ax=ax)
+    nodes.set_edgecolor('xkcd:black')
+    _style_nucleic_acid_nodes(nodes, G, id_type, node_color_map)
+
+    if labels is None:
+        labels = {n: n for n in G.nodes}
+    _draw_outside_labels(ax, G, node_pos, labels, node_font_size, node_size)
+
+    return node_pos
+
+
+def display_BioPlex_direct_interactions(ax, chain_to_UniProt_mapping_dict,
+    interacting_UniProt_IDs, chain_types, bp_PPI_df, node_pos, node_size,
+    edge_width, node_font_size=10, labels=None,
+    detected_edge_color='xkcd:green', not_detected_edge_color='xkcd:grey',
+    bait_node_color='xkcd:green', prey_node_color='xkcd:pale green',
+    other_node_color='0.7'):
+    '''
+    Display the same direct-interaction topology as
+    display_PDB_direct_interaction_network() (Figure 2, column 3), but
+    recolor each edge by whether that pair was also detected by BioPlex
+    AP-MS in the given cell line (green = detected, gray = not detected).
+    Solid/dashed edge style still reflects protein-protein vs
+    protein-nucleic acid, as in column 2. Protein nodes are colored by
+    bait/prey status in bp_PPI_df; nucleic acid nodes (not profiled by
+    AP-MS) are drawn as hollow, dashed-outline circles, as in column 2.
+
+    Parameters
+    ----------
+    ax object to draw on: Matplotlib Axes
+    Chain to UniProt Map: dict
+    Interacting UniProt/synthetic IDs: list
+    Chain Types: dict
+    DataFrame of PPIs for one cell line: Pandas DataFrame (from getBioPlex())
+    Networkx Position of Nodes: dict (from display_PDB_direct_interaction_network())
+    Size of Nodes in Network: int
+    Width of Edges in Network: float
+    Size of font for Node Labels: int (optional)
+    Node Labels: dict (optional)
+    Color of Edges Detected via AP-MS: str (optional)
+    Color of Edges Not Detected via AP-MS: str (optional)
+    Color of Nodes targeted as baits: str (optional)
+    Color of Nodes detected as preys only: str (optional)
+    Color of Nucleic Acid / Undetected Nodes: str (optional)
+
+    Returns
+    -------
+    None
+    '''
+    id_type = _id_type_map(chain_to_UniProt_mapping_dict, chain_types)
+    all_ids = sorted({id_i for ids in chain_to_UniProt_mapping_dict.values() for id_i in ids})
+
+    # strip isoform suffixes and build an undirected set of BioPlex-detected pairs
+    bp_edges = set()
+    baits, preys = set(), set()
+    for uniprot_A, uniprot_B in zip(bp_PPI_df.UniprotA, bp_PPI_df.UniprotB):
+        uniprot_A = uniprot_A.split('-')[0]
+        uniprot_B = uniprot_B.split('-')[0]
+        bp_edges.add(frozenset((uniprot_A, uniprot_B)))
+        baits.add(uniprot_A)
+        preys.add(uniprot_B)
+
+    G = nx.Graph()
+    G.add_nodes_from(all_ids)
+    G.add_edges_from(interacting_UniProt_IDs)
+
+    for a, b in G.edges:
+        detected = frozenset((a, b)) in bp_edges
+        color = detected_edge_color if detected else not_detected_edge_color
+        style = ('solid' if (id_type.get(a) == 'protein' and id_type.get(b) == 'protein')
+                 else 'dashed')
+        edges = nx.draw_networkx_edges(G, node_pos, edgelist=[(a, b)],
+                                       width=edge_width, style=style, ax=ax)
+        edges.set_edgecolor(color)
+
+    node_color_map = []
+    for node_i in G.nodes:
+        if id_type.get(node_i) != 'protein':
+            node_color_map.append(other_node_color)
+        elif node_i in baits:
+            node_color_map.append(bait_node_color)
+        elif node_i in preys:
+            node_color_map.append(prey_node_color)
+        else:
+            node_color_map.append(other_node_color)
+
+    nodes = nx.draw_networkx_nodes(G, node_pos, node_size=node_size,
+                                   node_color=node_color_map, ax=ax)
+    nodes.set_edgecolor('xkcd:black')
+    _style_nucleic_acid_nodes(nodes, G, id_type, node_color_map)
+
+    if labels is None:
+        labels = {n: n for n in G.nodes}
+    _draw_outside_labels(ax, G, node_pos, labels, node_font_size, node_size)
+
+
+def display_All_BioPlex_interactions_two_cell_lines(ax, protein_ids,
+    direct_pairs, bp_293t_df, bp_hct116_df, node_pos, node_size, edge_width,
+    node_font_size=10, labels=None,
+    cell_293t_color='xkcd:red', cell_hct116_color='xkcd:blue',
+    cell_both_color='xkcd:grey', not_detected_node_color='0.85',
+    direct_width=None, indirect_width=None):
+    '''
+    Display the full BioPlex subnetwork among a set of proteins (Figure 2,
+    column 4): edges colored by which cell line(s) detected them (293T
+    red / HCT116 blue / both grey); nodes colored by bait/prey status and
+    by cell line. Per the paper's own legend for this panel, every edge
+    is solid -- direct (also a PDB direct contact, in direct_pairs) is
+    drawn bold/thick, indirect is drawn thin. There is no dashed styling
+    in this panel (dashed is reserved for protein-nucleic acid edges in
+    the PDB-direct / BioPlex-direct panels, which this panel excludes
+    entirely since nucleic acids aren't AP-MS baits/preys).
+
+    Parameters
+    ----------
+    ax object to draw on: Matplotlib Axes
+    UniProt IDs to include as nodes: list (typically the protein-only IDs
+        from a structure's chain_to_UniProt_mapping_dict)
+    Direct (PDB-contact) pairs: set of frozenset({UniprotA, UniprotB})
+    DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
+    DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
+    Networkx Position of Nodes: dict
+    Size of Nodes in Network: int
+    Width of Edges in Network: float
+        Used as the bold/direct line width unless direct_width is given.
+    Size of font for Node Labels: int (optional)
+    Node Labels: dict (optional)
+    Color of 293T-only Edges/Baits: str (optional)
+    Color of HCT116-only Edges/Baits: str (optional)
+    Color of Shared (Both) Edges/Baits: str (optional)
+    Color of Nodes Not Detected in Either Cell Line: str (optional)
+    Width of Direct (bold) Edges: float (optional, defaults to edge_width)
+    Width of Indirect (thin) Edges: float (optional, defaults to 0.4 * edge_width)
+
+    Returns
+    -------
+    None
+    '''
+    if direct_width is None:
+        direct_width = edge_width
+    if indirect_width is None:
+        indirect_width = edge_width * 0.4
+    def edges_and_roles(df):
+        edges, baits, preys = set(), set(), set()
+        protein_ids_set = set(protein_ids)
+        for uniprot_A, uniprot_B in zip(df.UniprotA, df.UniprotB):
+            uniprot_A = uniprot_A.split('-')[0]
+            uniprot_B = uniprot_B.split('-')[0]
+            if uniprot_A in protein_ids_set and uniprot_B in protein_ids_set:
+                edges.add(frozenset((uniprot_A, uniprot_B)))
+                baits.add(uniprot_A)
+                preys.add(uniprot_B)
+        return edges, baits, preys
+
+    edges_293t, baits_293t, preys_293t = edges_and_roles(bp_293t_df)
+    edges_hct116, baits_hct116, preys_hct116 = edges_and_roles(bp_hct116_df)
+    all_edges = edges_293t | edges_hct116
+
+    G = nx.Graph()
+    G.add_nodes_from(protein_ids)
+    G.add_edges_from(tuple(edge) for edge in all_edges if len(edge) == 2)
+
+    for edge in all_edges:
+        if len(edge) != 2:
+            continue
+        a, b = tuple(edge)
+        in_293t, in_hct116 = edge in edges_293t, edge in edges_hct116
+        if in_293t and in_hct116:
+            color = cell_both_color
+        elif in_293t:
+            color = cell_293t_color
+        else:
+            color = cell_hct116_color
+        width = direct_width if edge in direct_pairs else indirect_width
+        edges = nx.draw_networkx_edges(G, node_pos, edgelist=[(a, b)],
+                                       width=width, style='solid', ax=ax)
+        edges.set_edgecolor(color)
+
+    node_color_map = []
+    for node_i in protein_ids:
+        is_bait_293t = node_i in baits_293t
+        is_bait_hct116 = node_i in baits_hct116
+        is_prey_293t = node_i in preys_293t
+        is_prey_hct116 = node_i in preys_hct116
+        if is_bait_293t and is_bait_hct116:
+            node_color_map.append(cell_both_color)
+        elif is_bait_293t:
+            node_color_map.append(cell_293t_color)
+        elif is_bait_hct116:
+            node_color_map.append(cell_hct116_color)
+        elif is_prey_293t and is_prey_hct116:
+            node_color_map.append(matplotlib.colors.to_rgba(cell_both_color, alpha=0.4))
+        elif is_prey_293t:
+            node_color_map.append(matplotlib.colors.to_rgba(cell_293t_color, alpha=0.4))
+        elif is_prey_hct116:
+            node_color_map.append(matplotlib.colors.to_rgba(cell_hct116_color, alpha=0.4))
+        else:
+            node_color_map.append(not_detected_node_color)
+
+    nodes = nx.draw_networkx_nodes(G, node_pos, node_size=node_size,
+                                   node_color=node_color_map, ax=ax)
+    nodes.set_edgecolor('xkcd:black')
+    nodes.set_linewidth(1.5)
+
+    if labels is None:
+        labels = {n: n for n in G.nodes}
+    _draw_outside_labels(ax, G, node_pos, labels, node_font_size, node_size)
+
+
+def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
+                            interact_dist_threshold):
+    '''
+    Internal helper: everything render_figure2_panels() and
+    render_figure2_panels_static() both need -- the PDB-direct/UniProt
+    mappings, chain color palette, structure-based node layout, and
+    gene-symbol labels -- computed once so the two entry points can't
+    drift out of sync with each other.
+    '''
+    from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
+                                          get_chain_centroids)
+
+    chain_to_uniprot, interacting_uniprot_ids, chain_types = (
+        PDB_to_interacting_chains_uniprot_maps(PDB_ID, protein_structure_dir,
+                                               interact_dist_threshold))
+
+    chain_color_palette = get_chain_color_palette(list(chain_types.keys()))
+    node_color_palette = get_uniprot_color_palette(chain_to_uniprot, chain_color_palette)
+
+    chain_centroids = get_chain_centroids(PDB_ID, protein_structure_dir)
+    structure_layout = get_structure_based_layout(chain_to_uniprot, chain_centroids)
+
+    # same PCA basis get_structure_based_layout() just used, exposed here
+    # so render_pdb_structure_static() can pre-rotate the structure into
+    # it too (see render_figure2_panels_static()) instead of the two
+    # panels each picking an independent (possibly mirrored) orientation
+    _, protein_centroid_points = _protein_centroids(chain_to_uniprot, chain_centroids)
+    structure_rotation, structure_center = _pca_rotation_matrix(protein_centroid_points)
+
+    id_type = _id_type_map(chain_to_uniprot, chain_types)
+    all_ids = sorted({id_i for ids in chain_to_uniprot.values() for id_i in ids})
+
+    # gene symbol labels where available, straight from the BioPlex dataframes
+    symbol_lookup = {}
+    for df in (bp_293t_df, bp_hct116_df):
+        for uniprot_A, symbol_A in zip(df.UniprotA, df.SymbolA):
+            symbol_lookup[uniprot_A.split('-')[0]] = symbol_A
+        for uniprot_B, symbol_B in zip(df.UniprotB, df.SymbolB):
+            symbol_lookup[uniprot_B.split('-')[0]] = symbol_B
+    labels = {id_i: symbol_lookup.get(id_i, id_i) for id_i in all_ids}
+
+    return dict(
+        chain_to_uniprot=chain_to_uniprot,
+        interacting_uniprot_ids=interacting_uniprot_ids,
+        chain_types=chain_types,
+        chain_color_palette=chain_color_palette,
+        node_color_palette=node_color_palette,
+        structure_layout=structure_layout,
+        structure_rotation=structure_rotation,
+        structure_center=structure_center,
+        id_type=id_type,
+        all_ids=all_ids,
+        labels=labels,
+    )
+
+
+def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df,
+                                 bp_hct116_df, prepared, node_size, edge_width,
+                                 node_font_size):
+    '''
+    Internal helper: draw the three network panels (PDB direct / BioPlex
+    direct / all BioPlex) onto the given 3 axes, using inputs already
+    computed by _prepare_figure2_inputs(). Shared by render_figure2_panels()
+    and render_figure2_panels_static() so the network-panel logic lives
+    in exactly one place.
+    '''
+    node_pos = display_PDB_direct_interaction_network(
+        axes[0], prepared['chain_to_uniprot'], prepared['interacting_uniprot_ids'],
+        prepared['chain_types'], prepared['node_color_palette'], node_size, edge_width,
+        node_font_size, labels=prepared['labels'], node_pos=prepared['structure_layout'])
+    axes[0].set_title('PDB Direct Interaction Network')
+    axes[0].axis('off')
+
+    display_BioPlex_direct_interactions(
+        axes[1], prepared['chain_to_uniprot'], prepared['interacting_uniprot_ids'],
+        prepared['chain_types'], bp_293t_df, node_pos, node_size, edge_width,
+        node_font_size, labels=prepared['labels'])
+    axes[1].set_title('BioPlex Direct Interactions (293T)')
+    axes[1].axis('off')
+
+    protein_ids = [id_i for id_i in prepared['all_ids']
+                  if prepared['id_type'].get(id_i) == 'protein']
+    direct_pairs = {frozenset((a, b)) for a, b in prepared['interacting_uniprot_ids']
+                    if prepared['id_type'].get(a) == 'protein'
+                    and prepared['id_type'].get(b) == 'protein'}
+    display_All_BioPlex_interactions_two_cell_lines(
+        axes[2], protein_ids, direct_pairs, bp_293t_df, bp_hct116_df,
+        node_pos, node_size, edge_width, node_font_size, labels=prepared['labels'])
+    axes[2].set_title('All BioPlex Interactions (293T + HCT116)')
+    axes[2].axis('off')
+
+
+def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
+    interact_dist_threshold=6, figsize=(16, 5.5), node_size=1400,
+    edge_width=2.5, node_font_size=9):
+    '''
+    Reproduce Figure 2F-H of Huttlin et al. 2021 for a given PDB structure:
+    finds direct interactions from the structure, overlays BioPlex AP-MS
+    data from both cell lines, and assembles the three network panels
+    (PDB direct / BioPlex direct / all BioPlex) into one matplotlib
+    figure sharing a chain-colored layout and consistent node colors. A
+    separate interactive py3Dmol view is also returned for the structure
+    itself (column 1); call .show() on it in a notebook.
+
+    For a single static image with the structure panel included (e.g.
+    when there's no browser/Jupyter available to view the interactive
+    py3Dmol view), see render_figure2_panels_static() instead.
+
+    Parameters
+    ----------
+    PDB ID: str
+    directory to store PDB file: str
+    DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
+    DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
+    Direct-contact distance threshold (Angstroms): int (optional)
+    figsize: tuple (optional)
+    Size of Nodes in Network: int (optional)
+    Width of Edges in Network: float (optional)
+    Size of font for Node Labels: int (optional)
+
+    Returns
+    -------
+    Figure
+        Matplotlib Figure with the three network panels.
+    py3Dmol.view
+        Interactive, chain-colored 3D render of the structure (column 1).
+    '''
+    prepared = _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df,
+                                       bp_hct116_df, interact_dist_threshold)
+    structure_view = render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir,
+                                                   prepared['chain_color_palette'])
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df,
+                                 bp_hct116_df, prepared, node_size, edge_width,
+                                 node_font_size)
+
+    fig.tight_layout()
+    for ax in axes:
+        _resolve_label_collisions(ax, node_size)
+    return fig, structure_view
+
+
+def _write_rotated_pdb(pdb_file_path, rotation, mean, out_path):
+    '''
+    Internal helper: write a copy of a legacy-format PDB file with every
+    atom coordinate transformed by `rotation @ (coord - mean)`. Used by
+    render_pdb_structure_static() to pre-rotate the structure into the
+    same PCA frame as get_structure_based_layout() before PyMOL ever sees
+    it, rather than asking PyMOL to match that frame after the fact.
+
+    Rewrites the ATOM/HETATM coordinate columns directly at the text level
+    rather than round-tripping through Biopython's Structure/Atom objects.
+    Round-tripping is not safe here: for residues with alternate
+    conformations (altloc), mutating `atom.coord` on the Structure object
+    only updates the "selected" conformer, but PDBIO.save() unpacks *all*
+    altloc conformers when writing -- so unselected conformers get written
+    with their original, unrotated coordinates while their neighbors are
+    rotated, producing spurious multi-hundred-angstrom "bonds" in the
+    output structure (and a corresponding visual artifact in PyMOL's
+    cartoon rendering, e.g. long stray lines fanning off the structure).
+    Transforming every coordinate-bearing line directly avoids this.
+    '''
+    with open(pdb_file_path) as f:
+        lines = f.readlines()
+
+    with open(out_path, 'w') as out:
+        for line in lines:
+            if line.startswith(('ATOM', 'HETATM')):
+                line = line.rstrip('\n').ljust(80) + '\n'
+                coord = rotation @ (np.array([
+                    float(line[30:38]), float(line[38:46]), float(line[46:54])
+                ]) - mean)
+                line = f'{line[:30]}{coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}{line[54:]}'
+            out.write(line)
+
+
+def _write_rotated_mmcif(cif_file_path, rotation, mean, out_path):
+    '''
+    mmCIF counterpart to _write_rotated_pdb() -- same rationale (text-level
+    rewrite to avoid Biopython's altloc-unpacking mismatch between mutated
+    and written atoms), adapted to mmCIF's `_atom_site` loop layout.
+
+    Unlike the legacy PDB format's fixed-width columns, mmCIF's `_atom_site`
+    loop is whitespace-token-delimited, with column order given by the
+    preceding `_atom_site.<field>` header lines -- so this locates the
+    Cartn_x/y/z token positions from that header, then rewrites only those
+    tokens on each ATOM/HETATM data line, leaving every other token
+    (including quoted ones, e.g. atom names like "O5'") untouched.
+    '''
+    with open(cif_file_path) as f:
+        lines = f.readlines()
+
+    field_names = []
+    in_atom_site_header = False
+    cartn_idx = None
+    out_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('_atom_site.'):
+            in_atom_site_header = True
+            field_names.append(stripped[len('_atom_site.'):])
+            out_lines.append(line)
+            continue
+        if in_atom_site_header and not stripped.startswith('_atom_site.'):
+            in_atom_site_header = False
+            cartn_idx = (field_names.index('Cartn_x'),
+                        field_names.index('Cartn_y'),
+                        field_names.index('Cartn_z'))
+
+        if cartn_idx is not None and line.startswith(('ATOM', 'HETATM')):
+            tokens = line.split()
+            xi, yi, zi = cartn_idx
+            coord = rotation @ (np.array([
+                float(tokens[xi]), float(tokens[yi]), float(tokens[zi])
+            ]) - mean)
+            tokens[xi], tokens[yi], tokens[zi] = (f'{coord[0]:.3f}',
+                                                  f'{coord[1]:.3f}',
+                                                  f'{coord[2]:.3f}')
+            line = ' '.join(tokens) + '\n'
+        out_lines.append(line)
+
+    with open(out_path, 'w') as out:
+        out.writelines(out_lines)
+
+
+def _write_rotated_structure(file_path, file_format, rotation, mean, out_path):
+    '''
+    Dispatch to _write_rotated_pdb() or _write_rotated_mmcif() based on
+    which format the structure was downloaded in (see
+    fetch_pdb_structure_file() in analysis_funcs.py).
+    '''
+    if file_format == 'mmCif':
+        _write_rotated_mmcif(file_path, rotation, mean, out_path)
+    else:
+        _write_rotated_pdb(file_path, rotation, mean, out_path)
+
+
+def render_pdb_structure_static(PDB_ID, protein_structure_dir, chain_color_palette,
+                                width=800, height=800, dpi=150,
+                                rotation=None, center=None):
+    '''
+    Render a static, chain-colored cartoon image of a PDB structure with
+    PyMOL, for embedding in a single static figure (see
+    render_figure2_panels_static()) -- e.g. for headless/no-browser use
+    where the interactive py3Dmol view (render_pdb_structure_py3Dmol())
+    isn't practical to view.
+
+    Requires the optional `pymol-open-source` package
+    (`pip install pymol-open-source`) -- not a core dependency of
+    bioplexpy, since it's a large (~30MB), compiled package only needed
+    for this static-rendering path.
+
+    Parameters
+    ----------
+    PDB ID: str
+    directory to store PDB file: str
+    Chain Color Palette: dict (e.g. from get_chain_color_palette())
+    width, height: int (optional)
+        Ray-traced image dimensions in pixels.
+    dpi: int (optional)
+    rotation: (3, 3) array (optional)
+        If given (with `center`), every atom is pre-rotated by
+        `rotation @ (coord - center)` before rendering, and PyMOL's own
+        cmd.orient() is skipped in favor of its default camera (which
+        looks down -Z), so the rendered image's screen x/y axes are
+        exactly the frame's PC1/PC2 -- the same two axes
+        get_structure_based_layout() uses for the network panels. Pass
+        the (rotation, mean) from _pca_rotation_matrix() applied to the
+        same chain centroids used for that layout (see
+        _prepare_figure2_inputs()) so the structure and network panels
+        share one orientation instead of each independently picking one
+        (which can come out as a mirror image of the other). If omitted,
+        falls back to PyMOL's own cmd.orient().
+    center: (3,) array (optional)
+        See `rotation`.
+
+    Returns
+    -------
+    numpy.ndarray
+        RGB(A) image array, ready to display via ax.imshow().
+    '''
+    try:
+        import pymol2
+    except ImportError as e:
+        raise ImportError(
+            "render_pdb_structure_static() requires the optional "
+            "'pymol-open-source' package: pip install pymol-open-source"
+        ) from e
+
+    from bioplexpy.analysis_funcs import fetch_pdb_structure_file
+    pdb_file_path, file_format = fetch_pdb_structure_file(PDB_ID, protein_structure_dir)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        png_path = os.path.join(tmpdir, f'{PDB_ID}.png')
+
+        if rotation is not None:
+            rotated_ext = 'cif' if file_format == 'mmCif' else 'pdb'
+            render_source_path = os.path.join(tmpdir, f'{PDB_ID}_rotated.{rotated_ext}')
+            _write_rotated_structure(pdb_file_path, file_format, rotation, center,
+                                     render_source_path)
+        else:
+            render_source_path = pdb_file_path
+
+        session = pymol2.PyMOL()
+        session.start()
+        try:
+            cmd = session.cmd
+            cmd.load(render_source_path, PDB_ID)
+            cmd.hide('everything')
+            cmd.show('cartoon')
+            cmd.bg_color('white')
+            cmd.set('ray_opaque_background', 1)
+            for chain_id, color in chain_color_palette.items():
+                hex_color = matplotlib.colors.to_hex(color).replace('#', '0x')
+                cmd.color(hex_color, f'chain {chain_id}')
+            if rotation is not None:
+                cmd.zoom()
+            else:
+                cmd.orient()
+            cmd.ray(width, height)
+            cmd.png(png_path, dpi=dpi)
+        finally:
+            session.stop()
+
+        return mpimg.imread(png_path)
+
+
+def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
+    interact_dist_threshold=6, figsize=(20, 5.5), node_size=1400, edge_width=2.5,
+    node_font_size=9, structure_width=800, structure_height=800):
+    '''
+    Like render_figure2_panels(), but produces a single static, 4-panel
+    matplotlib Figure -- the PDB structure (via PyMOL,
+    see render_pdb_structure_static()) plus the three network panels --
+    matching Figure 2's F/G/H layout in one file, for cases where an
+    interactive py3Dmol view isn't practical to view (e.g. no browser
+    access). Requires the optional `pymol-open-source` package; see
+    render_pdb_structure_static().
+
+    Parameters
+    ----------
+    PDB ID: str
+    directory to store PDB file: str
+    DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
+    DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
+    Direct-contact distance threshold (Angstroms): int (optional)
+    figsize: tuple (optional)
+    Size of Nodes in Network: int (optional)
+    Width of Edges in Network: float (optional)
+    Size of font for Node Labels: int (optional)
+    structure_width, structure_height: int (optional)
+        Ray-traced structure image dimensions in pixels.
+
+    Returns
+    -------
+    Figure
+        Matplotlib Figure with all four panels.
+    '''
+    prepared = _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df,
+                                       bp_hct116_df, interact_dist_threshold)
+    structure_image = render_pdb_structure_static(
+        PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
+        width=structure_width, height=structure_height,
+        rotation=prepared['structure_rotation'], center=prepared['structure_center'])
+
+    fig, axes = plt.subplots(1, 4, figsize=figsize)
+
+    axes[0].imshow(structure_image)
+    axes[0].set_title(f'{PDB_ID} Structure')
+    axes[0].axis('off')
+
+    _draw_figure2_network_panels(axes[1:], PDB_ID, protein_structure_dir, bp_293t_df,
+                                 bp_hct116_df, prepared, node_size, edge_width,
+                                 node_font_size)
+
+    fig.tight_layout()
+    for ax in axes[1:]:
+        _resolve_label_collisions(ax, node_size)
+    return fig

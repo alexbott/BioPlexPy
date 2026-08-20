@@ -1,6 +1,11 @@
 from .analysis_funcs import (
     PDB_chains_to_uniprot,
+    PDB_to_interacting_chains_uniprot_maps,
     bioplex2graph,
+    classify_chain,
+    classify_pdb_chains,
+    fetch_pdb_structure_file,
+    get_chain_centroids,
     get_DataFrame_from_PPI_network,
     get_interacting_chains_from_PDB,
     get_mappings_data,
@@ -13,14 +18,26 @@ from .analysis_funcs import (
 from .data_import_funcs import (
     get_PDB_from_UniProts,
     get_UniProts_from_CORUM,
+    get_UniProts_from_ComplexPortal,
     getBioPlex,
+    getComplexPortal,
     getCorum,
     getGSE122425,
 )
 from .version import __version__
 from .visualization_funcs import (
+    display_All_BioPlex_interactions_two_cell_lines,
+    display_BioPlex_direct_interactions,
+    display_PDB_direct_interaction_network,
     display_PDB_network_for_complex,
     display_PPI_network_for_complex,
     display_PPI_network_match_PDB,
+    get_chain_color_palette,
+    get_structure_based_layout,
+    get_uniprot_color_palette,
+    render_figure2_panels,
+    render_figure2_panels_static,
+    render_pdb_structure_py3Dmol,
+    render_pdb_structure_static,
 )
 

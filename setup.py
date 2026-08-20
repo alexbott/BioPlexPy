@@ -14,5 +14,5 @@ setup(
    author='Roger Vargas, Ludwig Geistlinger, Tyrone Lee',
    author_email='roger_vargas@g.harvard.edu',
    packages=['bioplexpy'],  #same as name
-   install_requires=['pandas','requests','anndata','networkx','numpy','matplotlib','biopython','scipy','pypdb'], #external packages as dependencies
+   install_requires=['pandas','requests','anndata','networkx','numpy','matplotlib','biopython','scipy','pypdb','py3Dmol'], #external packages as dependencies
 )

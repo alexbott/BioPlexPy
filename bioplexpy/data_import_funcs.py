@@ -2,6 +2,7 @@
 
 import io
 import itertools
+import re
 
 import anndata as ad
 import pandas as pd
@@ -223,6 +224,106 @@ def get_UniProts_from_CORUM(Corum_DF, Complex_ID):
         # NOTE: CORUM 5.1 now has a uniprot mapping txt file, not sure if better than DF?
     uniprot_IDs_list = (Corum_DF[Corum_DF.complex_id == Complex_ID].loc[:,
                                 'subunits_uniprot_id'].values[0].split(';'))
+    return uniprot_IDs_list
+
+def getComplexPortal(organism = '9606'):
+    '''
+    Functionality for retrieving the Complex Portal protein complex data.
+
+    Complex Portal (https://www.ebi.ac.uk/complexportal/) is a manually
+    curated, complementary source of protein complexes to CORUM -- an
+    evaluation comparing the two (see BioPlexPy repo history) found roughly
+    1,000 human complexes in Complex Portal with no close subunit-set match
+    in CORUM, several hundred of which have near-complete PDB structure
+    coverage.
+
+    Parameters
+    ----------
+    organism : str
+        NCBI taxonomy ID (default '9606', human). Complex Portal publishes
+        one file per organism at
+        https://ftp.ebi.ac.uk/pub/databases/intact/complex/current/complextab/.
+
+    Returns
+    -------
+    Pandas DataFrame
+        A dataframe with each row corresponding to a Complex Portal complex.
+        Notable columns: '#Complex ac' (Complex Portal accession, e.g.
+        'CPX-560'), 'Recommended name', and
+        'Identifiers (and stoichiometry) of molecules in complex' (a
+        '|'-separated list of accession(stoichiometry) tokens -- see
+        get_UniProts_from_ComplexPortal for extracting just the UniProt IDs).
+
+    Examples
+    --------
+    >>> ComplexPortal_df = getComplexPortal()
+    >>> ComplexPortal_df.size > 0
+    True
+    >>> '#Complex ac' in ComplexPortal_df.columns
+    True
+    >>> 'Identifiers (and stoichiometry) of molecules in complex' in ComplexPortal_df.columns
+    True
+    '''
+    baseURL = 'https://ftp.ebi.ac.uk/pub/databases/intact/complex/current/complextab/'
+    filename = f'{organism}.tsv'
+
+    response = requests.get(baseURL + filename)
+    response.raise_for_status()
+    content = response.content
+    ComplexPortal_df = pd.read_csv(io.BytesIO(content), sep = '\t')
+
+    return ComplexPortal_df
+
+# matches UniProt accession numbers (e.g. P12345, Q9Y6K9, A0A0B4J2F0),
+# used to pick UniProt IDs out of Complex Portal's mixed identifier lists
+# (which also contain CHEBI ligand IDs and nested CPX- complex references)
+_UNIPROT_ACCESSION_RE = re.compile(
+    r'^[OPQ][0-9][A-Z0-9]{3}[0-9]$'
+    r'|^[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]$'
+    r'|^[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9][A-Z][A-Z0-9]{2}[0-9]$'
+)
+
+def get_UniProts_from_ComplexPortal(ComplexPortal_DF, Complex_AC):
+    '''
+    Retrieve set of UniProt IDs corresponding to a Complex Portal complex.
+
+    This function takes a Complex Portal complex accession (e.g. 'CPX-560')
+    and Complex Portal complex DataFrame and returns the corresponding
+    UniProt IDs. Non-UniProt members of the complex -- small-molecule
+    ligands (CHEBI IDs) and nested sub-complex references (other CPX- IDs)
+    -- are dropped, matching the id list's actual mixed-namespace content.
+
+    Parameters
+    ----------
+    DataFrame of Complex Portal complexes : Pandas DataFrame
+    Complex Portal accession : str
+
+    Returns
+    -------
+    UniProt IDs
+        A list of UniProt IDs for the Complex Portal complex specified.
+
+    Examples
+    --------
+    # (1) Obtain Complex Portal complexes
+    # (2) Get set of UniProt IDs for the dynactin complex (CPX-26352)
+    >>> ComplexPortal_df = getComplexPortal()
+    >>> UniProts_dynactin = get_UniProts_from_ComplexPortal(ComplexPortal_df, Complex_AC = 'CPX-26352')
+    >>> len(UniProts_dynactin) > 0
+    True
+    >>> isinstance(UniProts_dynactin, list)
+    True
+    '''
+    id_field = (ComplexPortal_DF[ComplexPortal_DF['#Complex ac'] == Complex_AC]
+                .loc[:, 'Identifiers (and stoichiometry) of molecules in complex']
+                .values[0])
+
+    uniprot_IDs_list = []
+    for token in id_field.split('|'):
+        accession = token.split('(')[0].strip()
+        if _UNIPROT_ACCESSION_RE.match(accession):
+            uniprot_IDs_list.append(accession)
+
     return uniprot_IDs_list
 
 def get_PDB_from_UniProts(uniprot_IDs_list):
