@@ -968,7 +968,8 @@ def _id_type_map(chain_to_UniProt_mapping_dict, chain_types):
 
 
 def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_palette,
-                                 width=400, height=400, cartoon_style='cartoon'):
+                                 width=400, height=400, cartoon_style='cartoon',
+                                 rotation=None, center=None):
     '''
     Render a PDB structure interactively with py3Dmol, colored by chain.
 
@@ -987,6 +988,20 @@ def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_pale
     height: int (optional)
     cartoon_style: str (optional)
         py3Dmol style keyword, e.g. 'cartoon' or 'stick'.
+    rotation: (3, 3) array (optional)
+        If given (with `center`), every atom is pre-rotated by
+        `rotation @ (coord - center)` before the model is loaded, and
+        3Dmol.js's own default camera (looking down -Z, no explicit
+        rotate() call) is relied on -- the same approach
+        render_pdb_structure_static() uses for the PyMOL path, so the two
+        renderers share one orientation instead of each independently
+        picking one (which can come out as a mirror image of the other).
+        Pass the (rotation, mean) from _pca_rotation_matrix() applied to
+        the same chain centroids used for get_structure_based_layout()
+        (see _prepare_figure2_inputs()). If omitted, falls back to
+        3Dmol.js's own auto-fit via zoomTo() with no pre-rotation.
+    center: (3,) array (optional)
+        See `rotation`.
 
     Returns
     -------
@@ -996,8 +1011,17 @@ def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_pale
     from bioplexpy.analysis_funcs import fetch_pdb_structure_file
     pdb_file_path, file_format = fetch_pdb_structure_file(PDB_ID, protein_structure_dir)
 
-    with open(pdb_file_path) as pdb_file:
-        pdb_data = pdb_file.read()
+    if rotation is not None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rotated_ext = 'cif' if file_format == 'mmCif' else 'pdb'
+            rotated_path = os.path.join(tmpdir, f'{PDB_ID}_rotated.{rotated_ext}')
+            _write_rotated_structure(pdb_file_path, file_format, rotation, center,
+                                     rotated_path)
+            with open(rotated_path) as pdb_file:
+                pdb_data = pdb_file.read()
+    else:
+        with open(pdb_file_path) as pdb_file:
+            pdb_data = pdb_file.read()
 
     view = py3Dmol.view(width=width, height=height)
     view.addModel(pdb_data, 'cif' if file_format == 'mmCif' else 'pdb')
@@ -1407,8 +1431,9 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     '''
     prepared = _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df,
                                        bp_hct116_df, interact_dist_threshold)
-    structure_view = render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir,
-                                                   prepared['chain_color_palette'])
+    structure_view = render_pdb_structure_py3Dmol(
+        PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
+        rotation=prepared['structure_rotation'], center=prepared['structure_center'])
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
     _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df,
@@ -1658,3 +1683,82 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     for ax in axes[1:]:
         _resolve_label_collisions(ax, node_size)
     return fig
+
+
+def render_figure2_panels_for_uniprots(uniprot_IDs_list, protein_structure_dir,
+                                       bp_293t_df, bp_hct116_df, pdb_id=None,
+                                       static=True, **kwargs):
+    '''
+    TODO: provisional name, flagged for rename -- not yet decided (2026-08-20).
+
+    Convenience wrapper: given a complex's UniProt ID list -- from any
+    source, e.g. get_UniProts_from_CORUM() or get_UniProts_from_ComplexPortal()
+    -- picks a matching PDB structure and renders the Figure 2-style panels,
+    without having to manually call get_PDB_from_UniProts() and read a
+    candidate PDB ID out of the returned DataFrame first.
+
+    The auto-picked structure is whichever candidate from
+    get_PDB_from_UniProts() actually has the most of the *specific* input
+    UniProt IDs mapped to it (via that DataFrame's own
+    'UniProts_mapped_to_PDB' column), not just get_PDB_from_UniProts()'s
+    own default row order (closest protein *count*, then most recent
+    deposit). Matching on protein count alone is misleading whenever two
+    different complexes happen to be the same size and share some subunits
+    -- e.g. RNA Pol I and Pol II are both often modeled with 13 chains and
+    share 5 literal subunits, so the default order can rank a same-sized
+    Pol II structure above the real Pol I ones purely for being newer, even
+    though the Pol I structures cover all 13 of Pol I's own subunits and
+    the Pol II one covers only the 5 shared ones (a real case that surfaced
+    this exact bug). Ties in overlap count fall back to
+    get_PDB_from_UniProts()'s own ranking (protein-count closeness, then
+    deposit date). This still isn't a guarantee of the "right" structure --
+    e.g. it can't distinguish two equally-good candidates by quality/
+    resolution -- so if the auto-pick looks wrong, inspect
+    get_PDB_from_UniProts(uniprot_IDs_list) yourself (its
+    'UniProts_mapped_to_PDB' column shows exactly which input IDs each
+    candidate covers) and pass whichever PDB ID you prefer via `pdb_id`.
+
+    Parameters
+    ----------
+    UniProt IDs for the complex: list
+    directory to store PDB file: str
+    DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
+    DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
+    pdb_id: str (optional)
+        Skip auto-picking and use this PDB ID instead.
+    static: bool (optional, default True)
+        If True (default), renders via render_figure2_panels_static() (a
+        single static Figure, e.g. for no-browser use). If False, renders
+        via render_figure2_panels() (an interactive py3Dmol view for the
+        structure panel, plus a Figure for the three network panels).
+    **kwargs
+        Passed through to whichever of the two render functions is used
+        (e.g. figsize, node_size, interact_dist_threshold).
+
+    Returns
+    -------
+    Whatever the chosen render function returns:
+    render_figure2_panels_static() -> Figure
+    render_figure2_panels() -> (Figure, py3Dmol.view)
+    '''
+    from bioplexpy.data_import_funcs import get_PDB_from_UniProts
+
+    if pdb_id is None:
+        candidates = get_PDB_from_UniProts(uniprot_IDs_list)
+        if candidates is None or len(candidates) == 0:
+            raise ValueError(
+                'No PDB structure found for this UniProt ID list -- pass an '
+                'explicit pdb_id, or check the IDs with get_PDB_from_UniProts() '
+                'directly.')
+        # rank by genuine overlap with the input UniProt IDs first (not just
+        # protein-count coincidence), falling back to get_PDB_from_UniProts()'s
+        # own ranking to break ties -- see docstring for why this matters
+        overlap_count = candidates['UniProts_mapped_to_PDB'].apply(len)
+        ranked = candidates.assign(_overlap_count=overlap_count).sort_values(
+            by=['_overlap_count', 'num_proteins_diff_btwn_PDB_and_UniProts_input',
+               'deposit_date'],
+            ascending=[False, True, False])
+        pdb_id = ranked.index[0]
+
+    render_fn = render_figure2_panels_static if static else render_figure2_panels
+    return render_fn(pdb_id, protein_structure_dir, bp_293t_df, bp_hct116_df, **kwargs)

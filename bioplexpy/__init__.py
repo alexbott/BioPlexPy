@@ -36,6 +36,7 @@ from .visualization_funcs import (
     get_structure_based_layout,
     get_uniprot_color_palette,
     render_figure2_panels,
+    render_figure2_panels_for_uniprots,
     render_figure2_panels_static,
     render_pdb_structure_py3Dmol,
     render_pdb_structure_static,
