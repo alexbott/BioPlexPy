@@ -6,14 +6,20 @@ BioPlex AP-MS data. Installed as `bioplexpy-structure`; also runnable as
 `python -m bioplexpy.cli`.
 
 For each structure file this writes, into --out-dir:
-  <name>_contacts.tsv   structure contacts vs BioPlex 293T/HCT116 edges
+  <name>_contacts.tsv   structure contacts vs BioPlex 293T/HCT116 edges, plus
+                        the predictor's own chain-pair scores for predicted
+                        models (AF3/Boltz pair ipTM; ipSAE/pDockQ/pDockQ2 if
+                        a ColabFold scores file holds them)
   <name>_chain_map.tsv  which UniProt protein each chain was assigned
-  <name>_figure.png     the Figure 2-style panels (unless --no-render)
+  <name>_figure.png     the Figure 2-style panels (unless --no-render); for a
+                        predicted model with chain-pair scores, one figure
+                        per --confidence-style: <name>_figure_<style>.png
   <name>_structure.html interactive py3Dmol view (--interactive only)
 and, when two or more structures are processed:
   summary_contacts.tsv  every protein pair, how many of the models have it
                         as a contact, per-model columns, BioPlex columns,
-                        and (with --reference) the experimental structure
+                        and (with --reference) the experimental structure;
+                        per-model score columns named <model>:<score>_AB/_BA
 '''
 
 import argparse
@@ -133,8 +139,10 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
 
     from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
                                           compare_structure_contacts_to_BioPlex,
-                                          map_chains_to_uniprot)
-    from bioplexpy.visualization_funcs import (render_figure2_panels,
+                                          map_chains_to_uniprot,
+                                          read_interface_confidence)
+    from bioplexpy.visualization_funcs import (get_edge_confidence_scores,
+                                               render_figure2_panels,
                                                render_figure2_panels_static)
 
     # chain assignment: explicit mapping wins; otherwise match by sequence
@@ -155,23 +163,39 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
     maps = PDB_to_interacting_chains_uniprot_maps(
         structure_file, None, args.distance, chain_to_uniprot=file_chain_map,
         min_plddt=args.min_plddt)
-    contacts_df = compare_structure_contacts_to_BioPlex(*maps, bp_293t_df, bp_hct116_df)
+    # the predictor's own chain-pair scores, if it wrote any next to the model
+    interface_confidence = read_interface_confidence(structure_file,
+                                                     chain_ids=list(maps[2]))
+    contacts_df = compare_structure_contacts_to_BioPlex(
+        *maps, bp_293t_df, bp_hct116_df, interface_confidence=interface_confidence)
     contacts_df.to_csv(os.path.join(args.out_dir, f'{name}_contacts.tsv'),
                        sep='\t', index=False)
 
     if not args.no_render:
-        render_kwargs = dict(interact_dist_threshold=args.distance,
-                             chain_to_uniprot=file_chain_map, min_plddt=args.min_plddt)
-        if args.interactive:
-            fig, view = render_figure2_panels(structure_file, None, bp_293t_df,
-                                              bp_hct116_df, **render_kwargs)
-            view.write_html(os.path.join(args.out_dir, f'{name}_structure.html'))
-        else:
-            fig = render_figure2_panels_static(structure_file, None, bp_293t_df,
-                                               bp_hct116_df, **render_kwargs)
-        fig.savefig(os.path.join(args.out_dir, f'{name}_figure.png'), dpi=args.dpi,
-                    bbox_inches='tight')
-        plt.close(fig)
+        # one figure per confidence style, but only if there's a score to show
+        styles = [None if style == 'none' else style for style in args.confidence_style]
+        edge_scores, _ = get_edge_confidence_scores(
+            interface_confidence, maps[0], score=args.confidence_score,
+            reduce=args.confidence_reduce)
+        if edge_scores is None:
+            styles = [None]
+        for style in dict.fromkeys(styles):
+            render_kwargs = dict(interact_dist_threshold=args.distance,
+                                 chain_to_uniprot=file_chain_map,
+                                 min_plddt=args.min_plddt, confidence_style=style,
+                                 confidence_score=args.confidence_score,
+                                 confidence_reduce=args.confidence_reduce)
+            if args.interactive:
+                fig, view = render_figure2_panels(structure_file, None, bp_293t_df,
+                                                  bp_hct116_df, **render_kwargs)
+                view.write_html(os.path.join(args.out_dir, f'{name}_structure.html'))
+            else:
+                fig = render_figure2_panels_static(structure_file, None, bp_293t_df,
+                                                   bp_hct116_df, **render_kwargs)
+            suffix = f'_{style or "plain"}' if len(set(styles)) > 1 else ''
+            fig.savefig(os.path.join(args.out_dir, f'{name}_figure{suffix}.png'),
+                        dpi=args.dpi, bbox_inches='tight')
+            plt.close(fig)
 
     contacts = contacts_df[contacts_df.structure_contact]
     n_unmapped = (len(map_report) - int(map_report.accepted.sum())
@@ -181,6 +205,10 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                + f'; {len(contacts)} protein contacts, '
                f'{int(contacts.bioplex_293T.sum())} seen in 293T, '
                f'{int(contacts.bioplex_HCT116.sum())} in HCT116')
+    if interface_confidence is not None:
+        summary += (f"; {interface_confidence['tool']} scores "
+                    f"({', '.join(interface_confidence['scores'])}) from "
+                    f"{os.path.basename(interface_confidence['source'])}")
     return summary, contacts_df
 
 
@@ -214,16 +242,29 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
     structures in which it is a direct contact, one True/False column per
     structure, the BioPlex columns, and -- if `reference` (a set of
     frozenset pairs) is given -- whether the reference structure has it.
+    Any chain-pair score columns in the per-structure tables are carried
+    over per structure, as <name>:<score>_AB/_BA (oriented to this
+    table's UniprotA/UniprotB).
     '''
-    rows = {}
+    base_columns = {'UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
+                    'bioplex_293T', 'bioplex_HCT116'}
+    rows, score_columns = {}, []
     for name, df in contacts_by_name.items():
-        for rec in df.itertuples(index=False):
-            key = frozenset((rec.UniprotA, rec.UniprotB))
+        scores = [c for c in df.columns if c not in base_columns]
+        for rec in df.to_dict('records'):
+            key = frozenset((rec['UniprotA'], rec['UniprotB']))
             row = rows.setdefault(key, dict(
-                UniprotA=rec.UniprotA, UniprotB=rec.UniprotB,
-                SymbolA=rec.SymbolA, SymbolB=rec.SymbolB,
-                bioplex_293T=rec.bioplex_293T, bioplex_HCT116=rec.bioplex_HCT116))
-            row[name] = bool(rec.structure_contact)
+                UniprotA=rec['UniprotA'], UniprotB=rec['UniprotB'],
+                SymbolA=rec['SymbolA'], SymbolB=rec['SymbolB'],
+                bioplex_293T=rec['bioplex_293T'], bioplex_HCT116=rec['bioplex_HCT116']))
+            row[name] = bool(rec['structure_contact'])
+            flipped = rec['UniprotA'] != row['UniprotA']
+            for column in scores:
+                target = column
+                if flipped and column.endswith(('_AB', '_BA')):
+                    target = column[:-2] + column[-2:][::-1]
+                row[f'{name}:{target}'] = rec[column]
+        score_columns += [f'{name}:{c}' for c in scores]
     if reference is not None and reference - set(rows):
         # pairs only the reference has as a contact (and no model has as a
         # contact or BioPlex edge) still need symbols and BioPlex status
@@ -255,6 +296,10 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
                                         zip(summary.UniprotA, summary.UniprotB)]
         columns.append('reference_contact')
     columns += ['bioplex_293T', 'bioplex_HCT116'] + names
+    for column in score_columns:
+        if column not in summary:
+            summary[column] = float('nan')
+    columns += score_columns
     return (summary[columns]
             .sort_values(['n_structures_contact', 'SymbolA', 'SymbolB'],
                          ascending=[False, True, True])
@@ -304,6 +349,25 @@ def build_parser():
                           help='direct-contact distance cutoff in Angstroms (default 6)')
     analysis.add_argument('--bioplex-293t-version', default='3.0')
     analysis.add_argument('--bioplex-hct116-version', default='1.0')
+
+    confidence = parser.add_argument_group(
+        'interface confidence (predicted models; shown, never used to drop edges)')
+    confidence.add_argument('--confidence-style', nargs='+', default=['width', 'alpha', 'color'],
+                            choices=['width', 'alpha', 'color', 'none'],
+                            help="how the model network's edges show the predictor's "
+                                 'chain-pair score: line width, opacity, or viridis '
+                                 'color; several give one figure each (default: all '
+                                 'three); none = plain edges')
+    confidence.add_argument('--confidence-score', default='pair_iptm',
+                            help='score to show: pair_iptm (AlphaFold3/Boltz; default), '
+                                 'or ipsae/pdockq/pdockq2 if a ColabFold scores file '
+                                 'has them. All scores found go in the TSVs regardless')
+    confidence.add_argument('--confidence-reduce', default='mean',
+                            choices=['mean', 'min', 'max'],
+                            help='for scores that differ by direction (Boltz ipTM, '
+                                 'ipSAE, pDockQ2): combine A->B and B->A by mean '
+                                 '(default), min or max for the figure; the TSVs '
+                                 'keep both')
 
     output = parser.add_argument_group('output')
     output.add_argument('--out-dir', default='bioplexpy_structure_out',

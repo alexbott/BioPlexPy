@@ -999,6 +999,121 @@ def _style_nucleic_acid_nodes(nodes, G, id_type, node_color_map,
     nodes.set_linewidth(linewidths)
 
 
+# ways display_PDB_direct_interaction_network() can show a per-interface
+# score on each edge; all continuous on a fixed 0-1 scale, no cutoff
+CONFIDENCE_STYLES = ('width', 'alpha', 'color')
+_SCORE_NAMES = {'pair_iptm': 'chain-pair ipTM', 'ipsae': 'ipSAE',
+                'pdockq': 'pDockQ', 'pdockq2': 'pDockQ2'}
+_TOOL_NAMES = {'af3': 'AlphaFold3', 'boltz': 'Boltz', 'colabfold': 'ColabFold'}
+_REDUCERS = {'mean': np.mean, 'min': min, 'max': max}
+
+
+def get_edge_confidence_scores(interface_confidence, chain_to_UniProt_mapping_dict,
+                               score='pair_iptm', reduce='mean'):
+    '''
+    One score per protein pair, for drawing on the network edges, from a
+    predicted model's chain-pair scores (read_interface_confidence()).
+
+    Some scores are not symmetric -- Boltz pair ipTM, and the ipSAE and
+    pDockQ2 in some ColabFold pipelines' output give a different value for
+    A->B than for B->A -- so the two directions are combined with
+    `reduce`: 'mean' (default), 'min' (an edge only scores high if both
+    directions do) or 'max'. The contact tables keep both directions
+    (compare_structure_contacts_to_BioPlex()); this only affects the figure.
+
+    Parameters
+    ----------
+    interface_confidence: dict (from read_interface_confidence())
+    Chain to UniProt Map: dict
+    score: str (optional)
+        Which score to use: 'pair_iptm' (AlphaFold3, Boltz; default), or
+        'ipsae'/'pdockq'/'pdockq2' where a ColabFold scores file has them.
+    reduce: str (optional)
+        'mean', 'min' or 'max' of the two directions.
+
+    Returns
+    -------
+    dict or None
+        frozenset({UniProt_i, UniProt_j}) -> score; None if the model has
+        no such score.
+    str or None
+        Legend label naming the tool, the score, and -- when the two
+        directions actually differ -- how they were combined.
+    '''
+    from bioplexpy.analysis_funcs import interface_confidence_by_uniprot
+
+    if reduce not in _REDUCERS:
+        raise ValueError(f"reduce must be one of {list(_REDUCERS)}, got '{reduce}'")
+    if interface_confidence is None or score not in interface_confidence['scores']:
+        return None, None
+    directed = interface_confidence_by_uniprot(
+        interface_confidence, chain_to_UniProt_mapping_dict)[score]
+    by_pair = {}
+    for (id_i, id_j), value in directed.items():
+        by_pair.setdefault(frozenset((id_i, id_j)), []).append(value)
+    asymmetric = any(len(set(values)) > 1 for values in by_pair.values())
+    edge_scores = {pair: float(_REDUCERS[reduce](values))
+                   for pair, values in by_pair.items()}
+    label = (f"{_TOOL_NAMES.get(interface_confidence['tool'], interface_confidence['tool'])} "
+             f"{_SCORE_NAMES.get(score, score)}")
+    if asymmetric:
+        label += f' ({reduce} of both directions)'
+    return edge_scores, label
+
+
+def _confidence_edge_properties(edges, edge_scores, confidence_style, edge_width,
+                                edge_color):
+    '''
+    Internal helper: per-edge widths and RGBA colors that encode each
+    edge's score in the given style. Edges without a score keep the plain
+    width and color.
+    '''
+    base = matplotlib.colors.to_rgba(edge_color)
+    widths, colors = [], []
+    for a, b in edges:
+        value = edge_scores.get(frozenset((a, b)))
+        if value is None:
+            widths.append(edge_width)
+            colors.append(base)
+            continue
+        value = min(max(value, 0.0), 1.0)
+        if confidence_style == 'width':
+            widths.append(edge_width * (0.2 + 1.8 * value))
+            colors.append(base)
+        elif confidence_style == 'alpha':
+            widths.append(edge_width)
+            colors.append(base[:3] + (max(value, 0.05),))
+        else:
+            widths.append(edge_width)
+            colors.append(plt.cm.viridis(value))
+    return widths, colors
+
+
+def _draw_confidence_legend(ax, confidence_style, confidence_label, edge_width,
+                            edge_color):
+    '''
+    Internal helper: a key for the score encoding, below the panel -- a
+    colorbar for 'color', sample lines for 'width'/'alpha'.
+    '''
+    if confidence_style == 'color':
+        cax = ax.inset_axes([0.2, -0.06, 0.6, 0.03])
+        mappable = plt.cm.ScalarMappable(cmap=plt.cm.viridis,
+                                         norm=matplotlib.colors.Normalize(0, 1))
+        colorbar = ax.figure.colorbar(mappable, cax=cax, orientation='horizontal')
+        colorbar.set_label(confidence_label, fontsize=9)
+        colorbar.ax.tick_params(labelsize=8)
+        return
+    from matplotlib.lines import Line2D
+    samples = [0.1, 0.4, 0.7, 1.0]
+    widths, colors = _confidence_edge_properties(
+        [(s, s) for s in samples], {frozenset((s, s)): s for s in samples},
+        confidence_style, edge_width, edge_color)
+    handles = [Line2D([], [], linewidth=w, color=c) for w, c in zip(widths, colors)]
+    ax.legend(handles, [f'{s:g}' for s in samples], title=confidence_label,
+              loc='upper center', bbox_to_anchor=(0.5, 0.02), ncol=len(samples),
+              frameon=False, fontsize=8, title_fontsize=9, handlelength=2.5)
+
+
 def _id_type_map(chain_to_UniProt_mapping_dict, chain_types):
     '''
     Internal helper: build a UniProt/synthetic-ID -> chain type
@@ -1085,7 +1200,8 @@ def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_pale
 def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
     interacting_UniProt_IDs, chain_types, node_color_palette, node_size,
     edge_width, node_font_size=10, node_pos=None, labels=None,
-    edge_color='0.3'):
+    edge_color='0.3', edge_scores=None, confidence_style='width',
+    confidence_label=None):
     '''
     Display the PDB-derived direct interaction network for a structure
     (Figure 2, column 2): nodes colored to match the structure's chain
@@ -1094,6 +1210,11 @@ def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
     for protein-nucleic acid direct contacts. DNA/RNA nodes themselves are
     drawn as hollow circles with a dashed outline (matching the dashed-line
     convention used for their edges), rather than solid filled circles.
+
+    For a predicted model, each edge can also show the predictor's own
+    confidence in that interface (edge_scores, from
+    get_edge_confidence_scores()), on a continuous 0-1 scale with a key
+    below the panel. Nothing is hidden or cut off by score.
 
     Parameters
     ----------
@@ -1108,6 +1229,15 @@ def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
     Networkx Position of Nodes: dict (optional, computed if not given)
     Node Labels: dict (optional, defaults to the node IDs themselves)
     Color of edges: str (optional)
+    edge_scores: dict (optional)
+        frozenset({id_i, id_j}) -> score in 0-1, e.g. from
+        get_edge_confidence_scores(). Edges without a score are drawn plain.
+    confidence_style: str (optional)
+        How edge_scores are shown: 'width' (line width grows with the
+        score; default), 'alpha' (low scores fade) or 'color' (viridis
+        colormap with a colorbar).
+    confidence_label: str (optional)
+        Title for the score key, e.g. 'AlphaFold3 chain-pair ipTM'.
 
     Returns
     -------
@@ -1115,6 +1245,9 @@ def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
         Dictionary of Node Positions in NetworkX layout, for reuse by
         display_BioPlex_direct_interactions() so both panels share a layout.
     '''
+    if edge_scores and confidence_style not in CONFIDENCE_STYLES:
+        raise ValueError(f'confidence_style must be one of {CONFIDENCE_STYLES}, '
+                         f"got '{confidence_style}'")
     id_type = _id_type_map(chain_to_UniProt_mapping_dict, chain_types)
     all_ids = sorted({id_i for ids in chain_to_UniProt_mapping_dict.values() for id_i in ids})
 
@@ -1129,14 +1262,22 @@ def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
                    if id_type.get(a) == 'protein' and id_type.get(b) == 'protein']
     dashed_edges = [(a, b) for a, b in G.edges if (a, b) not in solid_edges]
 
-    if solid_edges:
-        edges = nx.draw_networkx_edges(G, node_pos, edgelist=solid_edges,
-                                       width=edge_width, style='solid', ax=ax)
-        edges.set_edgecolor(edge_color)
-    if dashed_edges:
-        edges = nx.draw_networkx_edges(G, node_pos, edgelist=dashed_edges,
-                                       width=edge_width, style='dashed', ax=ax)
-        edges.set_edgecolor(edge_color)
+    for edgelist, style in ((solid_edges, 'solid'), (dashed_edges, 'dashed')):
+        if not edgelist:
+            continue
+        if edge_scores:
+            widths, colors = _confidence_edge_properties(
+                edgelist, edge_scores, confidence_style, edge_width, edge_color)
+            nx.draw_networkx_edges(G, node_pos, edgelist=edgelist, width=widths,
+                                   edge_color=colors, style=style, ax=ax)
+        else:
+            edges = nx.draw_networkx_edges(G, node_pos, edgelist=edgelist,
+                                           width=edge_width, style=style, ax=ax)
+            edges.set_edgecolor(edge_color)
+    if edge_scores:
+        _draw_confidence_legend(ax, confidence_style,
+                                confidence_label or 'interface score', edge_width,
+                                edge_color)
 
     node_color_map = [node_color_palette.get(n, (0.7, 0.7, 0.7, 1.0)) for n in G.nodes]
     nodes = nx.draw_networkx_nodes(G, node_pos, node_size=node_size,
@@ -1336,7 +1477,8 @@ def display_All_BioPlex_interactions_two_cell_lines(ax, protein_ids,
 
 def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
                             interact_dist_threshold, chain_to_uniprot=None,
-                            min_plddt=None):
+                            min_plddt=None, confidence_score='pair_iptm',
+                            confidence_reduce='mean'):
     '''
     Internal helper: everything render_figure2_panels() and
     render_figure2_panels_static() both need -- the PDB-direct/UniProt
@@ -1346,7 +1488,9 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     '''
     from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
                                           _bioplex_symbol_lookup,
-                                          get_chain_centroids)
+                                          get_chain_centroids,
+                                          is_local_structure_file,
+                                          read_interface_confidence)
 
     chain_to_uniprot, interacting_uniprot_ids, chain_types = (
         PDB_to_interacting_chains_uniprot_maps(PDB_ID, protein_structure_dir,
@@ -1374,6 +1518,21 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     symbol_lookup = _bioplex_symbol_lookup(bp_293t_df, bp_hct116_df)
     labels = {id_i: symbol_lookup.get(id_i, id_i) for id_i in all_ids}
 
+    # a predicted model's own per-interface scores, if the predictor wrote
+    # them next to the model file
+    edge_scores, confidence_label = None, None
+    if is_local_structure_file(PDB_ID):
+        interface_confidence = read_interface_confidence(PDB_ID,
+                                                         chain_ids=list(chain_types))
+        edge_scores, confidence_label = get_edge_confidence_scores(
+            interface_confidence, chain_to_uniprot, score=confidence_score,
+            reduce=confidence_reduce)
+        if interface_confidence is not None and edge_scores is None:
+            warnings.warn(f"No '{confidence_score}' score in "
+                          f"{interface_confidence['source']} (it has: "
+                          f"{', '.join(interface_confidence['scores'])}); edges "
+                          'drawn without confidence.')
+
     return dict(
         chain_to_uniprot=chain_to_uniprot,
         interacting_uniprot_ids=interacting_uniprot_ids,
@@ -1386,12 +1545,14 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
         id_type=id_type,
         all_ids=all_ids,
         labels=labels,
+        edge_scores=edge_scores,
+        confidence_label=confidence_label,
     )
 
 
 def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df,
                                  bp_hct116_df, prepared, node_size, edge_width,
-                                 node_font_size):
+                                 node_font_size, confidence_style='width'):
     from bioplexpy.analysis_funcs import is_local_structure_file
     '''
     Internal helper: draw the three network panels (PDB direct / BioPlex
@@ -1407,7 +1568,10 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
     node_pos = display_PDB_direct_interaction_network(
         axes[0], prepared['chain_to_uniprot'], prepared['interacting_uniprot_ids'],
         prepared['chain_types'], prepared['node_color_palette'], node_size, edge_width,
-        node_font_size, labels=prepared['labels'], node_pos=node_pos)
+        node_font_size, labels=prepared['labels'], node_pos=node_pos,
+        edge_scores=prepared['edge_scores'] if confidence_style else None,
+        confidence_style=confidence_style,
+        confidence_label=prepared['confidence_label'])
     # a user's own file may be a prediction, not a PDB entry
     source = 'Model' if is_local_structure_file(PDB_ID) else 'PDB'
     axes[0].set_title(f'{source} Direct Interaction Network')
@@ -1434,7 +1598,8 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
 
 def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
     interact_dist_threshold=6, figsize=(16, 5.5), node_size=1400,
-    edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt=None):
+    edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt=None,
+    confidence_style='width', confidence_score='pair_iptm', confidence_reduce='mean'):
     '''
     Reproduce Figure 2F-H of Huttlin et al. 2021 for a given PDB structure:
     finds direct interactions from the structure, overlays BioPlex AP-MS
@@ -1466,6 +1631,20 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     min_plddt: float (optional)
         For predicted structures: ignore atoms below this pLDDT when
         finding direct contacts (see PDB_to_interacting_chains_uniprot_maps()).
+    confidence_style: str or None (optional)
+        For a predicted model whose predictor wrote per-interface scores
+        next to it (see read_interface_confidence()): how the model
+        network's edges show them -- 'width' (default), 'alpha' or
+        'color'; None draws plain edges. No effect on experimental
+        structures. Annotation only: no edge is removed.
+    confidence_score: str (optional)
+        Which score: 'pair_iptm' (AlphaFold3/Boltz chain-pair ipTM;
+        default), or 'ipsae'/'pdockq'/'pdockq2' if the model's ColabFold
+        scores file has them.
+    confidence_reduce: str (optional)
+        How the two directions of an asymmetric score (Boltz ipTM, ipSAE,
+        pDockQ2) become one edge value: 'mean' (default), 'min' or 'max'.
+        The legend says which, when it matters.
 
     Returns
     -------
@@ -1477,7 +1656,9 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     prepared = _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df,
                                        bp_hct116_df, interact_dist_threshold,
                                        chain_to_uniprot=chain_to_uniprot,
-                                       min_plddt=min_plddt)
+                                       min_plddt=min_plddt,
+                                       confidence_score=confidence_score,
+                                       confidence_reduce=confidence_reduce)
     structure_view = render_pdb_structure_py3Dmol(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         rotation=prepared['structure_rotation'], center=prepared['structure_center'])
@@ -1485,7 +1666,7 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     fig, axes = plt.subplots(1, 3, figsize=figsize)
     _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df,
                                  bp_hct116_df, prepared, node_size, edge_width,
-                                 node_font_size)
+                                 node_font_size, confidence_style=confidence_style)
 
     fig.tight_layout()
     for ax in axes:
@@ -1705,7 +1886,8 @@ def _wrap_title(title, width=40):
 def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
     interact_dist_threshold=6, figsize=(20, 5.5), node_size=1400, edge_width=2.5,
     node_font_size=9, structure_width=800, structure_height=800,
-    chain_to_uniprot=None, min_plddt=None):
+    chain_to_uniprot=None, min_plddt=None, confidence_style='width',
+    confidence_score='pair_iptm', confidence_reduce='mean'):
     '''
     Like render_figure2_panels(), but produces a single static, 4-panel
     matplotlib Figure -- the PDB structure (via PyMOL,
@@ -1735,6 +1917,20 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     min_plddt: float (optional)
         For predicted structures: ignore atoms below this pLDDT when
         finding direct contacts (see PDB_to_interacting_chains_uniprot_maps()).
+    confidence_style: str or None (optional)
+        For a predicted model whose predictor wrote per-interface scores
+        next to it (see read_interface_confidence()): how the model
+        network's edges show them -- 'width' (default), 'alpha' or
+        'color'; None draws plain edges. No effect on experimental
+        structures. Annotation only: no edge is removed.
+    confidence_score: str (optional)
+        Which score: 'pair_iptm' (AlphaFold3/Boltz chain-pair ipTM;
+        default), or 'ipsae'/'pdockq'/'pdockq2' if the model's ColabFold
+        scores file has them.
+    confidence_reduce: str (optional)
+        How the two directions of an asymmetric score (Boltz ipTM, ipSAE,
+        pDockQ2) become one edge value: 'mean' (default), 'min' or 'max'.
+        The legend says which, when it matters.
 
     Returns
     -------
@@ -1744,7 +1940,9 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     prepared = _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df,
                                        bp_hct116_df, interact_dist_threshold,
                                        chain_to_uniprot=chain_to_uniprot,
-                                       min_plddt=min_plddt)
+                                       min_plddt=min_plddt,
+                                       confidence_score=confidence_score,
+                                       confidence_reduce=confidence_reduce)
     structure_image = render_pdb_structure_static(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         width=structure_width, height=structure_height,
@@ -1759,7 +1957,7 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
 
     _draw_figure2_network_panels(axes[1:], PDB_ID, protein_structure_dir, bp_293t_df,
                                  bp_hct116_df, prepared, node_size, edge_width,
-                                 node_font_size)
+                                 node_font_size, confidence_style=confidence_style)
 
     fig.tight_layout()
     for ax in axes[1:]:

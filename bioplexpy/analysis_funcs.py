@@ -780,8 +780,12 @@ def _find_structure_files_in_zip(zip_path, extract_dir=None):
     root = os.path.realpath(extract_dir)
     notes, n_extracted = [], 0
     with zipfile.ZipFile(zip_path) as archive:
+        # structure files, plus the small per-model confidence files that
+        # read_interface_confidence() needs next to them (not full_data)
         members = [m for m in archive.infolist()
-                   if not m.is_dir() and m.filename.lower().endswith(exts)
+                   if not m.is_dir()
+                   and (m.filename.lower().endswith(exts)
+                        or _is_confidence_sidecar(m.filename))
                    and 'templates' not in m.filename.split('/')[:-1]]
         for member in members:
             target = os.path.realpath(os.path.join(root, member.filename))
@@ -789,7 +793,7 @@ def _find_structure_files_in_zip(zip_path, extract_dir=None):
                 notes.append(f'Skipped unsafe path in archive: {member.filename}')
                 continue
             archive.extract(member, root)
-            n_extracted += 1
+            n_extracted += member.filename.lower().endswith(exts)
     notes.append(f'Extracted {n_extracted} structure file(s) from {zip_path} '
                  f'into {root}')
 
@@ -1645,6 +1649,210 @@ def map_chains_to_uniprot(PDB_ID_structure_i, uniprot_IDs_list,
     return chain_map, pd.DataFrame(report_rows)
 
 
+# per-model confidence files written next to each model by the predictors
+# whose chain-pair scores read_interface_confidence() understands
+_CONFIDENCE_SIDECAR_PATTERNS = (
+    re.compile(r'_summary_confidences_\d+\.json$'),       # AlphaFold3 server
+    re.compile(r'(^|/)confidence_.+_model_\d+\.json$'),   # Boltz
+    re.compile(r'(^|/)processed/records/[^/]+\.json$'),   # Boltz chain names
+    re.compile(r'_scores_rank_\d+_.+\.json$'),            # ColabFold
+)
+
+
+def _is_confidence_sidecar(path):
+    '''
+    Internal helper: True for the per-model confidence JSON files that
+    read_interface_confidence() reads (never AF3's large full_data files).
+    '''
+    return any(p.search(path.replace(os.sep, '/')) for p in _CONFIDENCE_SIDECAR_PATTERNS)
+
+
+def find_interface_confidence_file(structure_file):
+    '''
+    Find the predictor's confidence file that belongs to one model file,
+    by each tool's own naming convention (files in the same folder):
+
+    - AlphaFold3 server: <job>_model_N.cif -> <job>_summary_confidences_N.json
+    - Boltz: <input>_model_N.cif -> confidence_<input>_model_N.json
+    - ColabFold: <job>_unrelaxed_rank_00N_<model>.pdb ->
+      <job>_scores_rank_00N_<model>.json
+
+    Parameters
+    ----------
+    path to a model file: str
+
+    Returns
+    -------
+    str or None
+        Path of the confidence file, or None if there is none (e.g. an
+        experimental structure) or more than one candidate matches.
+    str or None
+        Which tool's format it is: 'af3', 'boltz' or 'colabfold'.
+
+    Examples
+    --------
+    >>> find_interface_confidence_file('pdb6nmi.ent')
+    (None, None)
+    '''
+    directory = os.path.dirname(os.path.abspath(structure_file))
+    base = os.path.basename(structure_file)
+    candidates = []
+    m = re.match(r'(.+)_model_(\d+)\.(cif|mmcif|pdb)$', base, re.IGNORECASE)
+    if m:
+        candidates.append((f'{m.group(1)}_summary_confidences_{m.group(2)}.json', 'af3'))
+        candidates.append((f'confidence_{m.group(1)}_model_{m.group(2)}.json', 'boltz'))
+    m = re.match(r'(.+)_(?:un)?relaxed_(rank_\d+_.+)\.pdb$', base, re.IGNORECASE)
+    if m:
+        candidates.append((f'{m.group(1)}_scores_{m.group(2)}.json', 'colabfold'))
+    found = [(os.path.join(directory, name), tool) for name, tool in candidates
+             if os.path.isfile(os.path.join(directory, name))]
+    if len(found) != 1:
+        return None, None
+    return found[0]
+
+
+def read_interface_confidence(structure_file, chain_ids=None):
+    '''
+    Read a predicted model's own per-interface (chain-pair) confidence
+    scores, as written by the predictor next to the model file (see
+    find_interface_confidence_file()). Nothing is computed here: the
+    values are the predictor's, so scores from different tools are not
+    on a common scale.
+
+    - AlphaFold3 server: 'pair_iptm' (summary_confidences chain_pair_iptm;
+      symmetric).
+    - Boltz: 'pair_iptm' (confidence pair_chains_iptm; not symmetric --
+      [i][j] is kept as (chain i, chain j)).
+    - ColabFold: whichever of 'ipsae', 'pdockq', 'pdockq2' the scores file
+      holds, keyed 'A-B' ('pdockq' is symmetric and stored once; the
+      others per direction). Stock ColabFold has none of these (it only
+      reports whole-model ipTM), so its files give no scores.
+
+    The predictors key chain pairs by chain index or chain letter; these
+    are translated to the model file's chain IDs, and a mismatch between
+    the two files' chain lists is an error rather than a silent guess.
+
+    Parameters
+    ----------
+    path to a model file: str
+    chain_ids: list (optional)
+        The model's chain IDs in file order, if already known; otherwise
+        the model file is read to get them.
+
+    Returns
+    -------
+    dict or None
+        None if there is no confidence file (e.g. an experimental
+        structure) or it holds no chain-pair scores. Otherwise
+        {'tool': 'af3'|'boltz'|'colabfold', 'source': path,
+         'scores': {score_name: {(chain_i, chain_j): value}}}, with both
+        orders of every pair present (equal for symmetric scores) and no
+        same-chain entries.
+
+    Examples
+    --------
+    >>> read_interface_confidence('pdb6nmi.ent') is None
+    True
+    '''
+    import json
+
+    source, tool = find_interface_confidence_file(structure_file)
+    if source is None:
+        return None
+    if chain_ids is None:
+        chain_ids = [chain.get_id() for chain in _load_pdb_model(structure_file, None)]
+    chain_ids = list(chain_ids)
+    with open(source) as f:
+        data = json.load(f)
+
+    def from_matrix(matrix, order):
+        if len(matrix) != len(order):
+            raise ValueError(f'{source}: {len(matrix)} chains in the confidence '
+                             f'matrix but {len(order)} expected')
+        return {(order[i], order[j]): float(matrix[i][j])
+                for i in range(len(order)) for j in range(len(order)) if i != j}
+
+    def check_order(order, what):
+        if list(order) != chain_ids:
+            raise ValueError(f'{source}: chain order from {what} {list(order)} does '
+                             f'not match the model file {structure_file} {chain_ids}')
+
+    scores = {}
+    if tool == 'af3':
+        if 'chain_pair_iptm' not in data:
+            return None
+        # summary_confidences lists each token's chain; their first-seen
+        # order is the matrix order
+        if 'chain_ids' in data:
+            check_order(dict.fromkeys(data['chain_ids']), 'its chain_ids')
+        scores['pair_iptm'] = from_matrix(data['chain_pair_iptm'], chain_ids)
+    elif tool == 'boltz':
+        if 'pair_chains_iptm' not in data:
+            return None
+        pair = data['pair_chains_iptm']
+        n = len(pair)
+        matrix = [[pair[str(i)][str(j)] for j in range(n)] for i in range(n)]
+        # chain index -> chain name, from Boltz's own processed record of
+        # the input when it's there (predictions/<in>/ -> processed/records/)
+        group_dir = os.path.dirname(source)
+        record = os.path.join(os.path.dirname(os.path.dirname(group_dir)),
+                              'processed', 'records',
+                              os.path.basename(group_dir) + '.json')
+        if os.path.isfile(record):
+            with open(record) as f:
+                chains = json.load(f)['chains']
+            order = [c['chain_name'] for c in sorted(chains, key=lambda c: c['chain_id'])]
+            check_order(order, 'processed/records')
+        scores['pair_iptm'] = from_matrix(matrix, chain_ids)
+    else:
+        for score_name in ('ipsae', 'pdockq', 'pdockq2'):
+            if not isinstance(data.get(score_name), dict):
+                continue
+            values = {}
+            for key, value in data[score_name].items():
+                chain_i, chain_j = key.split('-')
+                if chain_i not in chain_ids or chain_j not in chain_ids:
+                    raise ValueError(f'{source}: {score_name} key {key!r} names a '
+                                     f'chain not in {structure_file} {chain_ids}')
+                values[(chain_i, chain_j)] = float(value)
+            for (chain_i, chain_j), value in list(values.items()):
+                values.setdefault((chain_j, chain_i), value)
+            scores[score_name] = values
+        if not scores:
+            return None
+    return dict(tool=tool, source=source, scores=scores)
+
+
+def interface_confidence_by_uniprot(interface_confidence, chain_to_UniProt_mapping_dict):
+    '''
+    Translate chain-pair scores from read_interface_confidence() to
+    protein pairs, using a chain -> UniProt mapping (as returned by
+    PDB_to_interacting_chains_uniprot_maps()). Where several chain pairs
+    map to the same protein pair (homo-oligomers), the highest score is
+    kept. Pairs of a protein with itself are left out, as in the contact
+    tables.
+
+    Parameters
+    ----------
+    interface_confidence: dict (from read_interface_confidence())
+    Chain to UniProt Map: dict
+
+    Returns
+    -------
+    dict
+        {score_name: {(UniProt_i, UniProt_j): value}}, directional.
+    '''
+    by_uniprot = {}
+    for score_name, values in interface_confidence['scores'].items():
+        out = by_uniprot.setdefault(score_name, {})
+        for (chain_i, chain_j), value in values.items():
+            for id_i in chain_to_UniProt_mapping_dict.get(chain_i, []):
+                for id_j in chain_to_UniProt_mapping_dict.get(chain_j, []):
+                    if id_i != id_j:
+                        out[(id_i, id_j)] = max(value, out.get((id_i, id_j), value))
+    return by_uniprot
+
+
 def _bioplex_edges_and_roles(bp_PPI_df, restrict_to=None):
     '''
     Internal helper: the undirected set of BioPlex-detected pairs
@@ -1683,7 +1891,8 @@ def _bioplex_symbol_lookup(*bp_PPI_dfs):
 
 def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
                                           interacting_UniProt_IDs, chain_types,
-                                          bp_293t_df, bp_hct116_df):
+                                          bp_293t_df, bp_hct116_df,
+                                          interface_confidence=None):
     '''
     Tabulate how a structure's direct protein-protein contacts line up
     with BioPlex AP-MS interactions in both cell lines -- the numbers
@@ -1699,6 +1908,13 @@ def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
     Chain Types: dict
     DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
     DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
+    interface_confidence: dict (optional)
+        A predicted model's chain-pair scores, from
+        read_interface_confidence(). Adds two columns per score,
+        <score>_AB and <score>_BA (A = UniprotA's chain(s), as the
+        predictor orders the pair; equal for symmetric scores), to every
+        row -- contacts or not -- and NaN where the model has no score.
+        Annotation only: no row is added or dropped.
 
     Returns
     -------
@@ -1706,8 +1922,9 @@ def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
         One row per pair of proteins in the structure that is a direct
         contact in the structure, a BioPlex interaction in either cell
         line, or both. Columns: UniprotA, UniprotB, SymbolA, SymbolB,
-        structure_contact, bioplex_293T, bioplex_HCT116. Nucleic acid and
-        unmapped chains are left out (AP-MS can't detect them).
+        structure_contact, bioplex_293T, bioplex_HCT116 (plus any score
+        columns). Nucleic acid and unmapped chains are left out (AP-MS
+        can't detect them).
 
     Examples
     --------
@@ -1742,6 +1959,15 @@ def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
                          bioplex_HCT116=pair in edges_hct116))
     columns = ['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
                'bioplex_293T', 'bioplex_HCT116']
+    if interface_confidence is not None:
+        by_uniprot = interface_confidence_by_uniprot(interface_confidence,
+                                                     chain_to_UniProt_mapping_dict)
+        for score_name, values in by_uniprot.items():
+            for row in rows:
+                a, b = row['UniprotA'], row['UniprotB']
+                row[f'{score_name}_AB'] = values.get((a, b), np.nan)
+                row[f'{score_name}_BA'] = values.get((b, a), np.nan)
+            columns += [f'{score_name}_AB', f'{score_name}_BA']
     return (pd.DataFrame(rows, columns=columns)
             .sort_values(['structure_contact', 'SymbolA', 'SymbolB'],
                          ascending=[False, True, True])
