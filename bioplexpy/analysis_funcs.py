@@ -1823,6 +1823,20 @@ def read_interface_confidence(structure_file, chain_ids=None):
     return dict(tool=tool, source=source, scores=scores)
 
 
+def _read_interface_confidence_or_warn(structure_file, chain_ids=None):
+    '''
+    Internal helper: read_interface_confidence(), but a confidence file
+    that doesn't fit its model (e.g. a different chain list) only costs the
+    scores -- a warning is issued and None returned -- so the contact
+    analysis and figure still go ahead. Used by the CLI and the renderers.
+    '''
+    try:
+        return read_interface_confidence(structure_file, chain_ids=chain_ids)
+    except (ValueError, KeyError) as e:
+        warnings.warn(f'Interface confidence for {structure_file} skipped: {e}')
+        return None
+
+
 def interface_confidence_by_uniprot(interface_confidence, chain_to_UniProt_mapping_dict):
     '''
     Translate chain-pair scores from read_interface_confidence() to

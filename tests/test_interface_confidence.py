@@ -105,6 +105,63 @@ def test_colabfold_precomputed_scores():
     assert get_edge_confidence_scores(confidence, {c: [c] for c in 'ABCDEFG'}) == (None, None)
 
 
+def test_colabfold_chain_letters_match_contacts():
+    '''
+    Ed's pDockQ is 0 where the model has no interface, so the chain pairs
+    with pDockQ > 0 should be (nearly) the 6 A contact pairs -- a wrong
+    letter-to-chain reading would disagree across the board. The cutoffs
+    differ (pDockQ ~8 A between CB atoms), so allow one borderline pair.
+    '''
+    from bioplexpy.analysis_funcs import _direct_interaction_chain_pairs, _load_pdb_model
+    folder = os.path.join(ARP23, 'af2_multimer')
+    _need(folder)
+    for f in find_structure_files(folder)[0]:
+        contacts = {frozenset(p) for p in
+                    _direct_interaction_chain_pairs(_load_pdb_model(f, None), 6)}
+        pdockq = read_interface_confidence(f)['scores']['pdockq']
+        positive = {frozenset(k) for k, v in pdockq.items() if v > 0}
+        assert len(contacts ^ positive) <= 1, (f, contacts ^ positive)
+
+
+def test_mismatched_confidence_file_only_drops_scores():
+    '''
+    A confidence file whose chain list doesn't fit the model is an error
+    for the reader, but the CLI/renderers only lose the scores.
+    '''
+    import shutil
+    import warnings
+    import pandas as pd
+    from bioplexpy.analysis_funcs import (_read_interface_confidence_or_warn,
+                                          compare_structure_contacts_to_BioPlex)
+    folder = os.path.join(ARP23, 'af3')
+    _need(folder)
+    model = sorted(glob.glob(os.path.join(folder, '*_model_0.cif')))[0]
+    summary = model.replace('_model_0.cif', '_summary_confidences_0.json')
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(model, tmp)
+        with open(summary) as fh:
+            data = json.load(fh)
+        data['chain_ids'] = [{'A': 'B', 'B': 'A'}.get(c, c) for c in data['chain_ids']]
+        with open(os.path.join(tmp, os.path.basename(summary)), 'w') as fh:
+            json.dump(data, fh)
+        copied = os.path.join(tmp, os.path.basename(model))
+        try:
+            read_interface_confidence(copied)
+            raise AssertionError('mismatched chain order was not caught')
+        except ValueError:
+            pass
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            assert _read_interface_confidence_or_warn(copied) is None
+        assert any('skipped' in str(w.message) for w in caught)
+    bp = pd.DataFrame(dict(UniprotA=['P1'], UniprotB=['P2'], SymbolA=['A'], SymbolB=['B']))
+    table = compare_structure_contacts_to_BioPlex(
+        {'A': ['P1'], 'B': ['P2']}, [('P1', 'P2')], {'A': 'protein', 'B': 'protein'},
+        bp, bp, interface_confidence=None)
+    assert list(table.columns) == ['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB',
+                                   'structure_contact', 'bioplex_293T', 'bioplex_HCT116']
+
+
 def test_homo_oligomer_keeps_highest():
     confidence = dict(tool='af3', source='x', scores={'pair_iptm': {
         ('A', 'C'): 0.2, ('C', 'A'): 0.2, ('B', 'C'): 0.8, ('C', 'B'): 0.8,

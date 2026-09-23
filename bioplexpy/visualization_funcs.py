@@ -1489,8 +1489,8 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
                                           _bioplex_symbol_lookup,
                                           get_chain_centroids,
-                                          is_local_structure_file,
-                                          read_interface_confidence)
+                                          _read_interface_confidence_or_warn,
+                                          is_local_structure_file)
 
     chain_to_uniprot, interacting_uniprot_ids, chain_types = (
         PDB_to_interacting_chains_uniprot_maps(PDB_ID, protein_structure_dir,
@@ -1522,8 +1522,8 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     # them next to the model file
     edge_scores, confidence_label = None, None
     if is_local_structure_file(PDB_ID):
-        interface_confidence = read_interface_confidence(PDB_ID,
-                                                         chain_ids=list(chain_types))
+        interface_confidence = _read_interface_confidence_or_warn(
+            PDB_ID, chain_ids=list(chain_types))
         edge_scores, confidence_label = get_edge_confidence_scores(
             interface_confidence, chain_to_uniprot, score=confidence_score,
             reduce=confidence_reduce)

@@ -139,8 +139,8 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
 
     from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
                                           compare_structure_contacts_to_BioPlex,
-                                          map_chains_to_uniprot,
-                                          read_interface_confidence)
+                                          _read_interface_confidence_or_warn,
+                                          map_chains_to_uniprot)
     from bioplexpy.visualization_funcs import (get_edge_confidence_scores,
                                                render_figure2_panels,
                                                render_figure2_panels_static)
@@ -164,8 +164,8 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
         structure_file, None, args.distance, chain_to_uniprot=file_chain_map,
         min_plddt=args.min_plddt)
     # the predictor's own chain-pair scores, if it wrote any next to the model
-    interface_confidence = read_interface_confidence(structure_file,
-                                                     chain_ids=list(maps[2]))
+    interface_confidence = _read_interface_confidence_or_warn(
+        structure_file, chain_ids=list(maps[2]))
     contacts_df = compare_structure_contacts_to_BioPlex(
         *maps, bp_293t_df, bp_hct116_df, interface_confidence=interface_confidence)
     contacts_df.to_csv(os.path.join(args.out_dir, f'{name}_contacts.tsv'),
