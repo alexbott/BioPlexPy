@@ -7,6 +7,7 @@ from .analysis_funcs import (
     compare_structure_contacts_to_BioPlex,
     fetch_pdb_structure_file,
     fetch_uniprot_sequences,
+    find_structure_files,
     get_chain_centroids,
     get_chain_sequences,
     get_DataFrame_from_PPI_network,

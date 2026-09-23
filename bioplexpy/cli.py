@@ -17,32 +17,35 @@ and, when two or more structures are processed:
 '''
 
 import argparse
-import glob
 import json
 import os
+import re
 import sys
 import tempfile
 import traceback
 
 import pandas as pd
 
-_STRUCTURE_EXTS = ('.pdb', '.ent', '.cif', '.mmcif')
 
 
 def _collect_structure_files(paths):
-    '''Expand directories (non-recursively) into their structure files.'''
-    files = []
+    '''
+    Expand each path into its model files with find_structure_files()
+    (which recognizes AF3-server, ColabFold and Boltz output layouts),
+    printing what was detected. Returns the files and the set of distinct
+    prediction inputs seen (Boltz predictions/<input> folder names).
+    '''
+    from bioplexpy.analysis_funcs import find_structure_files
+    files, inputs = [], set()
     for path in paths:
-        if os.path.isdir(path):
-            found = sorted(f for f in glob.glob(os.path.join(path, '*'))
-                           if f.lower().endswith(_STRUCTURE_EXTS))
-            if not found:
-                print(f'warning: no {"/".join(_STRUCTURE_EXTS)} files in {path}',
-                      file=sys.stderr)
-            files.extend(found)
-        else:
-            files.append(path)
-    return files
+        found, notes, groups = find_structure_files(path)
+        for note in notes:
+            print(note, file=sys.stderr)
+        files.extend(found)
+        inputs.update(os.path.basename(g) for g in groups)
+    # the same file given twice (e.g. a folder and a file inside it)
+    files = list(dict.fromkeys(os.path.abspath(f) for f in files))
+    return files, inputs
 
 
 def _read_chain_map(pairs, map_file):
@@ -81,15 +84,37 @@ def _read_uniprots(ids, ids_file):
     return uniprots or None
 
 
-def _unique_name(structure_file, used):
-    '''File stem, prefixed with its directory name if the stem repeats.'''
+def _unique_names(structure_files):
+    '''
+    Output name per file: its stem, with just enough parent folder names
+    prepended to tell apart files that share a stem (e.g. two Boltz runs
+    of the same input both produce arp23_model_0.cif), so no file's
+    outputs overwrite another's.
+    '''
     from bioplexpy.analysis_funcs import structure_label
-    name = structure_label(structure_file)
-    if name in used:
-        parent = os.path.basename(os.path.dirname(os.path.abspath(structure_file)))
-        name = f'{parent}_{name}'
-    used.add(name)
-    return name
+    parts = {f: os.path.normpath(os.path.abspath(f)).split(os.sep)[:-1]
+             for f in structure_files}
+    depth = {f: 0 for f in structure_files}
+
+    def name(f):
+        prefix = parts[f][len(parts[f]) - depth[f]:] if depth[f] else []
+        return '_'.join(prefix + [structure_label(f)])
+
+    while True:
+        by_name = {}
+        for f in structure_files:
+            by_name.setdefault(name(f), []).append(f)
+        clashes = [fs for fs in by_name.values() if len(fs) > 1]
+        if not clashes:
+            return {f: re.sub(r'[^A-Za-z0-9_.-]', '_', name(f)) for f in structure_files}
+        grew = False
+        for fs in clashes:
+            for f in fs:
+                if depth[f] < len(parts[f]):
+                    depth[f] += 1
+                    grew = True
+        if not grew:
+            raise ValueError(f'Cannot give distinct names to {clashes[0]}')
 
 
 def process_structure(structure_file, name, args, chain_map, uniprots,
@@ -209,7 +234,8 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
     names = list(contacts_by_name)
     summary = pd.DataFrame(list(rows.values()))
     for name in names:
-        summary[name] = summary[name].fillna(False).astype(bool) if name in summary else False
+        # pairs missing from a structure's table are not contacts there
+        summary[name] = summary[name].eq(True) if name in summary else False
     summary['n_structures_contact'] = summary[names].sum(axis=1).astype(int)
     summary['fraction_structures_contact'] = (summary.n_structures_contact
                                               / len(names)).round(3)
@@ -236,8 +262,12 @@ def build_parser():
                'Example: bioplexpy-structure models/ --uniprots P61158 P61160 '
                '--min-plddt 70')
     parser.add_argument('structures', nargs='+',
-                        help='.pdb/.ent/.cif/.mmcif files, or directories of them '
-                             '(not searched recursively)')
+                        help='.pdb/.ent/.cif/.mmcif files, or directories of them. '
+                             'Raw predictor output folders can be given as-is: '
+                             'AlphaFold3 server and ColabFold models are read from '
+                             'the top of the folder (templates are ignored), Boltz '
+                             'models from boltz_results_*/predictions/*/; other '
+                             'folders are not searched below their top level')
 
     mapping = parser.add_argument_group(
         'chain assignment (give an explicit mapping, or UniProt IDs to match by sequence)')
@@ -290,9 +320,17 @@ def main(argv=None):
         parser.error('give a chain mapping (--chain-map/--chain-map-file) or the '
                      "complex's UniProt IDs (--uniprots/--uniprots-file)")
 
-    structure_files = _collect_structure_files(args.structures)
+    structure_files, prediction_inputs = _collect_structure_files(args.structures)
     if not structure_files:
         parser.error('no structure files found')
+    # one Boltz run over several input files holds several different
+    # complexes; a single across-structure summary of them is meaningless
+    summarize = len(prediction_inputs) <= 1
+    if not summarize:
+        print(f'warning: these outputs hold {len(prediction_inputs)} different '
+              f'prediction inputs ({", ".join(sorted(prediction_inputs))}); each is '
+              'processed, but no combined summary_contacts.tsv is written -- run '
+              'each input folder separately for one.', file=sys.stderr)
 
     import matplotlib
     matplotlib.use('Agg')
@@ -305,10 +343,10 @@ def main(argv=None):
     bp_hct116_df = getBioPlex('HCT116', args.bioplex_hct116_version)
 
     failures = 0
-    used_names = set()
+    names = _unique_names(structure_files)
     contacts_by_name = {}
     for structure_file in structure_files:
-        name = _unique_name(structure_file, used_names)
+        name = names[structure_file]
         try:
             summary, contacts_df = process_structure(structure_file, name, args, chain_map,
                                         uniprots, bp_293t_df, bp_hct116_df)
@@ -319,7 +357,7 @@ def main(argv=None):
             print(f'{structure_file}: FAILED -- {e}', file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
-    if len(contacts_by_name) >= 2 or (contacts_by_name and args.reference):
+    if summarize and (len(contacts_by_name) >= 2 or (contacts_by_name and args.reference)):
         reference = None
         if args.reference:
             try:

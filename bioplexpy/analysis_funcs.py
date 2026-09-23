@@ -642,6 +642,113 @@ def is_local_structure_file(structure):
     return os.path.isfile(structure)
 
 
+def find_structure_files(path):
+    '''
+    Find the model files in a structure predictor's output, as written by
+    the tool -- or in any directory of structure files.
+
+    A directory is searched at its top level (.pdb/.ent/.cif/.mmcif),
+    which covers the AlphaFold3 server (model_0..4.cif at the top, with
+    template hits in a templates/ subfolder that must NOT be counted as
+    models) and ColabFold (ranked PDBs at the top). Known nested layouts
+    are recognized explicitly rather than by searching every subfolder,
+    since a stray template or reference file counted as a "model" would
+    silently skew any across-model summary:
+
+    - Boltz: a boltz_results_<name>/ folder (or a folder containing one)
+      keeps its models in predictions/<input>/<input>_model_N.cif.
+
+    ColabFold writes both relaxed and unrelaxed copies of each ranked
+    model when relaxation is on; only the unrelaxed one is kept, so the
+    same model isn't counted twice and every tool is compared on
+    unrelaxed coordinates.
+
+    If nothing is found, any structure files in subfolders are listed in
+    the returned notes, so the right folder can be given instead.
+
+    Parameters
+    ----------
+    path to a structure file or a directory: str
+
+    Returns
+    -------
+    list of str
+        Model file paths, sorted.
+    list of str
+        Notes on what was detected or skipped, for display.
+    list of str
+        Prediction groups found (Boltz predictions/<input> folders). More
+        than one means the output holds several different inputs, which
+        shouldn't be summarized together.
+
+    Examples
+    --------
+    >>> files, notes, groups = find_structure_files('.')
+    '''
+    exts = tuple(_LOCAL_STRUCTURE_FORMATS)
+
+    def structure_files_in(directory):
+        return sorted(os.path.join(directory, f) for f in os.listdir(directory)
+                      if f.lower().endswith(exts)
+                      and os.path.isfile(os.path.join(directory, f)))
+
+    if os.path.isfile(path):
+        return [str(path)], [], []
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"No such file or directory: '{path}'")
+
+    files, notes, groups = [], [], []
+
+    # Boltz: `path` is a boltz_results_* folder (has predictions/), or
+    # contains one or more boltz_results_* folders
+    boltz_roots = [os.path.join(path, d) for d in sorted(os.listdir(path))
+                   if d.startswith('boltz_results_')
+                   and os.path.isdir(os.path.join(path, d))]
+    if os.path.isdir(os.path.join(path, 'predictions')):
+        boltz_roots.insert(0, str(path))
+    for root in boltz_roots:
+        predictions = os.path.join(root, 'predictions')
+        if not os.path.isdir(predictions):
+            continue
+        for group in sorted(os.listdir(predictions)):
+            group_dir = os.path.join(predictions, group)
+            if not os.path.isdir(group_dir):
+                continue
+            models = [f for f in structure_files_in(group_dir)
+                      if re.search(r'_model_\d+\.', os.path.basename(f))]
+            if models:
+                groups.append(group_dir)
+                files.extend(models)
+                notes.append(f'Boltz output: {len(models)} model(s) in {group_dir}')
+
+    top_level = structure_files_in(path)
+
+    # ColabFold: drop the relaxed duplicate of each ranked unrelaxed model
+    colabfold = {}
+    for f in top_level:
+        m = re.match(r'(.*)_(relaxed|unrelaxed)_(rank_\d+.*)$', os.path.basename(f))
+        if m:
+            colabfold.setdefault((m.group(1), m.group(3)), {})[m.group(2)] = f
+    dropped = {kinds['relaxed'] for kinds in colabfold.values()
+               if 'relaxed' in kinds and 'unrelaxed' in kinds}
+    if dropped:
+        notes.append(f'ColabFold output: skipped {len(dropped)} relaxed duplicate(s) '
+                     'of unrelaxed models')
+    files.extend(f for f in top_level if f not in dropped)
+
+    if not files:
+        nested = [os.path.join(d, f) for d, _, fs in os.walk(path) for f in fs
+                  if f.lower().endswith(exts)]
+        if nested:
+            shown = ', '.join(nested[:5]) + (' ...' if len(nested) > 5 else '')
+            notes.append(f'No model files at the top of {path}, but {len(nested)} '
+                         f'structure file(s) in subfolders ({shown}) -- point at '
+                         'the folder that holds the models themselves.')
+        else:
+            notes.append(f'No structure files found in {path}')
+    return sorted(files), notes, groups
+
+
 def structure_label(structure):
     '''
     Short, filesystem-safe name for a structure: the PDB ID itself, or a
