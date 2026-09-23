@@ -10,6 +10,10 @@ For each structure file this writes, into --out-dir:
   <name>_chain_map.tsv  which UniProt protein each chain was assigned
   <name>_figure.png     the Figure 2-style panels (unless --no-render)
   <name>_structure.html interactive py3Dmol view (--interactive only)
+and, when two or more structures are processed:
+  summary_contacts.tsv  every protein pair, how many of the models have it
+                        as a contact, per-model columns, BioPlex columns,
+                        and (with --reference) the experimental structure
 '''
 
 import argparse
@@ -17,6 +21,7 @@ import glob
 import json
 import os
 import sys
+import tempfile
 import traceback
 
 import pandas as pd
@@ -137,11 +142,88 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
     contacts = contacts_df[contacts_df.structure_contact]
     n_unmapped = (len(map_report) - int(map_report.accepted.sum())
                   if 'accepted' in map_report else 0)
-    return (f'{len(file_chain_map)} chains mapped'
-            + (f' ({n_unmapped} unmapped)' if n_unmapped else '')
-            + f'; {len(contacts)} protein contacts, '
-            f'{int(contacts.bioplex_293T.sum())} seen in 293T, '
-            f'{int(contacts.bioplex_HCT116.sum())} in HCT116')
+    summary = (f'{len(file_chain_map)} chains mapped'
+               + (f' ({n_unmapped} unmapped)' if n_unmapped else '')
+               + f'; {len(contacts)} protein contacts, '
+               f'{int(contacts.bioplex_293T.sum())} seen in 293T, '
+               f'{int(contacts.bioplex_HCT116.sum())} in HCT116')
+    return summary, contacts_df
+
+
+def reference_contacts(reference, args, chain_map, uniprots):
+    '''
+    Direct protein contacts (as frozensets of UniProt IDs) in a reference
+    structure -- an RCSB PDB ID (mapped via SIFTS) or a local file (mapped
+    with the same --chain-map/--uniprots as the models).
+    '''
+    from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
+                                          is_local_structure_file,
+                                          map_chains_to_uniprot)
+    ref_chain_map = None
+    if is_local_structure_file(reference):
+        ref_chain_map = (chain_map if chain_map is not None
+                         else map_chains_to_uniprot(reference, uniprots)[0])
+    # a PDB ID is downloaded to a throwaway directory, not into --out-dir
+    with tempfile.TemporaryDirectory() as download_dir:
+        chain_to_uniprot, interacting, chain_types = PDB_to_interacting_chains_uniprot_maps(
+            reference, download_dir, args.distance, chain_to_uniprot=ref_chain_map)
+    protein_ids = {id_i for chain_id, ids in chain_to_uniprot.items()
+                   if chain_types.get(chain_id) == 'protein' for id_i in ids}
+    return {frozenset(pair) for pair in interacting if set(pair) <= protein_ids}
+
+
+def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=None):
+    '''
+    Combine per-structure contact tables (from
+    compare_structure_contacts_to_BioPlex()) into one table: a row per
+    protein pair seen in any of them, with the number and fraction of
+    structures in which it is a direct contact, one True/False column per
+    structure, the BioPlex columns, and -- if `reference` (a set of
+    frozenset pairs) is given -- whether the reference structure has it.
+    '''
+    rows = {}
+    for name, df in contacts_by_name.items():
+        for rec in df.itertuples(index=False):
+            key = frozenset((rec.UniprotA, rec.UniprotB))
+            row = rows.setdefault(key, dict(
+                UniprotA=rec.UniprotA, UniprotB=rec.UniprotB,
+                SymbolA=rec.SymbolA, SymbolB=rec.SymbolB,
+                bioplex_293T=rec.bioplex_293T, bioplex_HCT116=rec.bioplex_HCT116))
+            row[name] = bool(rec.structure_contact)
+    if reference is not None and reference - set(rows):
+        # pairs only the reference has as a contact (and no model has as a
+        # contact or BioPlex edge) still need symbols and BioPlex status
+        from bioplexpy.analysis_funcs import (_bioplex_edges_and_roles,
+                                              _bioplex_symbol_lookup)
+        symbols = _bioplex_symbol_lookup(bp_293t_df, bp_hct116_df)
+        edges_293t = _bioplex_edges_and_roles(bp_293t_df)[0]
+        edges_hct116 = _bioplex_edges_and_roles(bp_hct116_df)[0]
+        for key in reference - set(rows):
+            uniprot_A, uniprot_B = sorted(key)
+            rows[key] = dict(UniprotA=uniprot_A, UniprotB=uniprot_B,
+                             SymbolA=symbols.get(uniprot_A, uniprot_A),
+                             SymbolB=symbols.get(uniprot_B, uniprot_B),
+                             bioplex_293T=key in edges_293t,
+                             bioplex_HCT116=key in edges_hct116)
+
+    names = list(contacts_by_name)
+    summary = pd.DataFrame(list(rows.values()))
+    for name in names:
+        summary[name] = summary[name].fillna(False).astype(bool) if name in summary else False
+    summary['n_structures_contact'] = summary[names].sum(axis=1).astype(int)
+    summary['fraction_structures_contact'] = (summary.n_structures_contact
+                                              / len(names)).round(3)
+    columns = ['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'n_structures_contact',
+               'fraction_structures_contact']
+    if reference is not None:
+        summary['reference_contact'] = [frozenset((a, b)) in reference for a, b in
+                                        zip(summary.UniprotA, summary.UniprotB)]
+        columns.append('reference_contact')
+    columns += ['bioplex_293T', 'bioplex_HCT116'] + names
+    return (summary[columns]
+            .sort_values(['n_structures_contact', 'SymbolA', 'SymbolB'],
+                         ascending=[False, True, True])
+            .reset_index(drop=True))
 
 
 def build_parser():
@@ -192,6 +274,9 @@ def build_parser():
                              'network PNG, instead of the static 4-panel PNG '
                              '(which needs pymol-open-source)')
     output.add_argument('--dpi', type=int, default=150)
+    output.add_argument('--reference', metavar='PDB_ID_OR_FILE',
+                        help='experimental structure to compare against in '
+                             'summary_contacts.tsv, e.g. --reference 6YW7')
     return parser
 
 
@@ -221,16 +306,29 @@ def main(argv=None):
 
     failures = 0
     used_names = set()
+    contacts_by_name = {}
     for structure_file in structure_files:
         name = _unique_name(structure_file, used_names)
         try:
-            summary = process_structure(structure_file, name, args, chain_map,
+            summary, contacts_df = process_structure(structure_file, name, args, chain_map,
                                         uniprots, bp_293t_df, bp_hct116_df)
             print(f'{structure_file}: {summary}')
+            contacts_by_name[name] = contacts_df
         except Exception as e:
             failures += 1
             print(f'{structure_file}: FAILED -- {e}', file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+
+    if len(contacts_by_name) >= 2 or (contacts_by_name and args.reference):
+        reference = None
+        if args.reference:
+            try:
+                reference = reference_contacts(args.reference, args, chain_map, uniprots)
+            except Exception as e:
+                failures += 1
+                print(f'reference {args.reference}: FAILED -- {e}', file=sys.stderr)
+        summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference).to_csv(
+            os.path.join(args.out_dir, 'summary_contacts.tsv'), sep='\t', index=False)
 
     print(f'Wrote results for {len(structure_files) - failures}/{len(structure_files)} '
           f'structure(s) to {args.out_dir}', file=sys.stderr)
