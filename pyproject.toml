@@ -28,6 +28,9 @@ dependencies = [
     "scipy",
 ]
 
+[project.scripts]
+bioplexpy-structure = "bioplexpy.cli:main"
+
 [project.optional-dependencies]
 devel = [
     "ruff",

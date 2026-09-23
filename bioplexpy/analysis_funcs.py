@@ -4,6 +4,7 @@ import itertools
 import os
 import random
 import re
+import warnings
 from collections import Counter
 
 import networkx as nx
@@ -617,10 +618,55 @@ def classify_chain(chain):
     return 'other'
 
 
+_LOCAL_STRUCTURE_FORMATS = {'.pdb': 'pdb', '.ent': 'pdb',
+                             '.cif': 'mmCif', '.mmcif': 'mmCif'}
+
+
+def is_local_structure_file(structure):
+    '''
+    Return True if `structure` is a path to an existing local structure
+    file (.pdb/.ent/.cif/.mmcif, case-insensitive) rather than a PDB ID.
+
+    Every structure-taking function in BioPlexPy accepts either form: a
+    PDB ID is downloaded from RCSB, a local file (e.g. a user's own
+    experimental model or an AlphaFold/Boltz/ColabFold prediction) is
+    read in place.
+
+    Examples
+    --------
+    >>> is_local_structure_file('6NMI')
+    False
+    '''
+    if not isinstance(structure, (str, os.PathLike)):
+        return False
+    return os.path.isfile(structure)
+
+
+def structure_label(structure):
+    '''
+    Short, filesystem-safe name for a structure: the PDB ID itself, or a
+    local file's name without its extension. Used for figure titles and
+    temporary file names, where a full path would not work.
+
+    Examples
+    --------
+    >>> structure_label('6NMI')
+    '6NMI'
+    '''
+    if is_local_structure_file(structure):
+        name = os.path.splitext(os.path.basename(structure))[0]
+    else:
+        name = str(structure)
+    return re.sub(r'[^A-Za-z0-9_.-]', '_', name)
+
+
 def fetch_pdb_structure_file(PDB_ID_structure_i, protein_structure_dir):
     '''
     Download a PDB structure, preferring the legacy PDB format but falling
-    back to mmCIF if RCSB doesn't have a legacy file for it.
+    back to mmCIF if RCSB doesn't have a legacy file for it. If given the
+    path to a local structure file instead of a PDB ID, nothing is
+    downloaded: the file is used in place, with its format taken from the
+    extension (.pdb/.ent -> 'pdb', .cif/.mmcif -> 'mmCif').
 
     RCSB no longer generates legacy .pdb files for a growing share of new
     depositions (typically larger/newer cryo-EM structures) -- some don't
@@ -650,6 +696,15 @@ def fetch_pdb_structure_file(PDB_ID_structure_i, protein_structure_dir):
     >>> file_format
     'pdb'
     '''
+    if is_local_structure_file(PDB_ID_structure_i):
+        ext = os.path.splitext(str(PDB_ID_structure_i))[1].lower()
+        if ext not in _LOCAL_STRUCTURE_FORMATS:
+            raise ValueError(
+                f"Unrecognized structure file extension '{ext}' for "
+                f"'{PDB_ID_structure_i}'; expected one of "
+                f"{sorted(_LOCAL_STRUCTURE_FORMATS)} (decompress .gz files first).")
+        return str(PDB_ID_structure_i), _LOCAL_STRUCTURE_FORMATS[ext]
+
     pdbl = PDBList()
     pdb_file_path = pdbl.retrieve_pdb_file(PDB_ID_structure_i,
                                            pdir=protein_structure_dir,
@@ -681,7 +736,10 @@ def _load_pdb_model(PDB_ID_structure_i, protein_structure_dir):
     file_path, file_format = fetch_pdb_structure_file(PDB_ID_structure_i,
                                                        protein_structure_dir)
     parser = MMCIFParser(QUIET=True) if file_format == 'mmCif' else PDBParser(QUIET=True)
-    structure = parser.get_structure(PDB_ID_structure_i, file_path)
+    structure = parser.get_structure(structure_label(PDB_ID_structure_i), file_path)
+    if len(structure) == 0:
+        raise ValueError(f"No atoms could be read from '{file_path}' -- is it a "
+                         'valid PDB/mmCIF structure file?')
     return structure[0]
 
 
@@ -767,6 +825,34 @@ def get_chain_centroids(PDB_ID_structure_i, protein_structure_dir):
     return centroids
 
 
+def _plddt_scale_factor(model):
+    '''
+    Internal helper: work out how to read a model's B-factor column as
+    pLDDT on a 0-100 scale, for predicted structures (AlphaFold2/3,
+    ColabFold, Boltz and ESMFold all store per-atom pLDDT there, some on
+    0-100 and some on 0-1).
+
+    Returns 100.0 if every polymer-atom value is within 0-1, 1.0 if they
+    are within 0-100, or None (with a warning) if the column can't be
+    pLDDT -- all zeros, or anything outside 0-100 (e.g. a real
+    experimental B-factor) -- in which case the caller should skip
+    filtering rather than silently drop every atom.
+    '''
+    bfactors = np.array([atom.get_bfactor() for atom in model.get_atoms()
+                         if atom.get_parent().id[0] == ' '])
+    if bfactors.size == 0 or not np.any(bfactors):
+        warnings.warn('min_plddt given, but the B-factor column is empty/all '
+                      'zero, so it holds no pLDDT values -- skipping the pLDDT '
+                      'filter.')
+        return None
+    if bfactors.min() < 0 or bfactors.max() > 100:
+        warnings.warn('min_plddt given, but B-factor values fall outside 0-100, '
+                      'so they are not pLDDT (is this an experimental '
+                      'structure?) -- skipping the pLDDT filter.')
+        return None
+    return 100.0 if bfactors.max() <= 1.0 else 1.0
+
+
 def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, dist_threshold):
     '''
     Retreive chain pairs that are physically close to eachother from
@@ -809,13 +895,26 @@ def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, d
     return _direct_interaction_chain_pairs(model, dist_threshold)
 
 
-def _direct_interaction_chain_pairs(model, dist_threshold):
+def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None):
     '''
     Internal helper: compute directly-interacting chain pairs for an
     already-loaded Bio.PDB model. Factored out of
     get_interacting_chains_from_PDB() so PDB_to_interacting_chains_uniprot_maps()
     can reuse a single downloaded/parsed structure instead of re-fetching it.
+
+    If min_plddt is given (predicted structures only), atoms whose pLDDT
+    (read from the B-factor column, see _plddt_scale_factor()) is below
+    it are left out of the contact search, so low-confidence regions
+    (e.g. disordered loops placed arbitrarily by the predictor) can't
+    create spurious chain-chain contacts.
     '''
+    plddt_scale = _plddt_scale_factor(model) if min_plddt is not None else None
+
+    def keep(atom):
+        if atom.get_parent().id[0] != ' ':
+            return False
+        return plddt_scale is None or atom.get_bfactor() * plddt_scale >= min_plddt
+
     # only consider chains that are (at least in part) protein or nucleic
     # acid polymers; pure ligand/water "chains" are not meaningful subunits
     chain_IDs = [chain.get_id() for chain in model
@@ -836,9 +935,9 @@ def _direct_interaction_chain_pairs(model, dist_threshold):
         # get polymer atoms from each chain (excludes waters/ions/ligands,
         # 'A' stands for ATOM in unfold_entities' entity-level codes)
         atom_list_i = [atom for atom in Selection.unfold_entities(chain_i, "A")
-                       if atom.get_parent().id[0] == ' ']
+                       if keep(atom)]
         atom_list_j = [atom for atom in Selection.unfold_entities(chain_j, "A")
-                       if atom.get_parent().id[0] == ' ']
+                       if keep(atom)]
 
         if not atom_list_i or not atom_list_j:
             continue
@@ -1078,7 +1177,9 @@ def PDB_chains_to_uniprot(interacting_chains_list,
 
 def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
                                            protein_structure_dir,
-                                           interact_dist_threshold):
+                                           interact_dist_threshold,
+                                           chain_to_uniprot=None,
+                                           min_plddt=None):
     '''
     Get interacting chains from PDB structure mapped to UniProt IDs and
     PDB chain to UniProt mappings.
@@ -1096,11 +1197,27 @@ def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
     still appear as nodes in the returned interaction list rather than
     raising a KeyError or being silently dropped.
 
+    Protein chains with no UniProt mapping (e.g. a chain SIFTS doesn't
+    cover, or one left out of a user-supplied chain_to_uniprot) are
+    labeled 'UNMAPPED:<chain>' in the same way, and a warning is issued.
+
     Parameters
     ----------
-    PDB ID: str
-    directory to store PDB file: str
+    PDB ID or path to a local structure file: str
+    directory to store PDB file: str (ignored for a local file)
     distance threshold: int
+    chain_to_uniprot: dict (optional)
+        Chain ID -> UniProt ID (or list of IDs, or any free-text label,
+        e.g. for a non-human or designed chain). Replaces the SIFTS
+        lookup, which only exists for RCSB entries -- required for a
+        local structure file (see map_chains_to_uniprot() to build one
+        automatically by sequence). Isoform suffixes ('-2') are dropped,
+        since BioPlex nodes are canonical accessions.
+    min_plddt: float (optional)
+        For predicted structures: ignore atoms with pLDDT below this
+        (0-100 scale) when finding direct contacts. See
+        _plddt_scale_factor(); skipped with a warning if the B-factor
+        column doesn't hold pLDDT values.
 
     Returns
     -------
@@ -1120,20 +1237,349 @@ def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
     # load the structure once and reuse it for both the direct-interaction
     # search and the chain classification (avoids downloading it twice)
     model = _load_pdb_model(PDB_ID, protein_structure_dir)
-    interacting_chains_list = _direct_interaction_chain_pairs(model, interact_dist_threshold)
+    interacting_chains_list = _direct_interaction_chain_pairs(
+        model, interact_dist_threshold, min_plddt=min_plddt)
     chain_types = _classify_chains(model)
 
-    # get chain > UniProt ID mappings for this PDB structure (protein chains only)
-    chain_to_UniProt_mapping_dict = list_uniprot_pdb_mappings(PDB_ID) or {}
+    # get chain > UniProt ID mappings: user-supplied if given, otherwise
+    # SIFTS (protein chains only). A local file has no SIFTS entry, so
+    # it must come with a mapping.
+    if chain_to_uniprot is not None:
+        chain_to_UniProt_mapping_dict = _normalize_chain_mapping(
+            chain_to_uniprot, chain_types)
+    elif is_local_structure_file(PDB_ID):
+        raise ValueError(
+            f"'{PDB_ID}' is a local structure file, which has no SIFTS "
+            "chain-to-UniProt mapping -- pass chain_to_uniprot (see "
+            "map_chains_to_uniprot() to build one by sequence).")
+    else:
+        chain_to_UniProt_mapping_dict = list_uniprot_pdb_mappings(PDB_ID) or {}
 
-    # nucleic acid chains have no UniProt ID (SIFTS is protein-only); give
-    # them a synthetic, still-unique label so downstream lookups don't KeyError
+    # nucleic acid chains have no UniProt ID (SIFTS is protein-only), and
+    # a protein chain may be unmapped; give both a synthetic, still-unique
+    # label so downstream lookups don't KeyError
+    unmapped = []
     for chain_id, chain_type in chain_types.items():
-        if chain_id not in chain_to_UniProt_mapping_dict and chain_type in ('dna', 'rna'):
+        if chain_id in chain_to_UniProt_mapping_dict or chain_type == 'other':
+            continue
+        if chain_type in ('dna', 'rna'):
             chain_to_UniProt_mapping_dict[chain_id] = [f'{chain_type.upper()}:{chain_id}']
+        else:
+            chain_to_UniProt_mapping_dict[chain_id] = [f'UNMAPPED:{chain_id}']
+            unmapped.append(chain_id)
+    if unmapped:
+        warnings.warn(f'No UniProt ID for protein chain(s) {unmapped}; '
+                      "labeled 'UNMAPPED:<chain>' (no BioPlex data can match them).")
 
     # get list of chains pairs that interact in PDB structure using UniProts
     interacting_UniProt_IDs = PDB_chains_to_uniprot(interacting_chains_list,
                                                 chain_to_UniProt_mapping_dict)
 
     return [chain_to_UniProt_mapping_dict, interacting_UniProt_IDs, chain_types]
+def _normalize_chain_mapping(chain_to_uniprot, chain_types):
+    '''
+    Internal helper: validate and normalize a user-supplied chain ->
+    UniProt mapping into the {chain: [ID, ...]} form list_uniprot_pdb_mappings()
+    returns. Values may be a single ID or a list; isoform suffixes are
+    dropped (BioPlex nodes are canonical accessions, so 'Q92747-2' would
+    otherwise never match). Keys that aren't chains in the structure are
+    an error (typically a typo, e.g. 'a' for 'A').
+    '''
+    unknown = [chain_id for chain_id in chain_to_uniprot if chain_id not in chain_types]
+    if unknown:
+        raise ValueError(f'chain_to_uniprot has chain IDs not in the structure: '
+                         f'{unknown} (structure chains: {list(chain_types)})')
+    normalized = {}
+    for chain_id, ids in chain_to_uniprot.items():
+        if isinstance(ids, str):
+            ids = [ids]
+        normalized[chain_id] = [_strip_isoform(id_i) for id_i in ids]
+    return normalized
+
+
+def _strip_isoform(id_i):
+    '''
+    Internal helper: 'Q92747-2' -> 'Q92747'. Leaves free-text labels
+    (anything that isn't a UniProt accession with an isoform suffix)
+    untouched.
+    '''
+    match = re.fullmatch(r'([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})-\d+', id_i)
+    return match.group(1) if match else id_i
+
+
+def get_chain_sequences(PDB_ID_structure_i, protein_structure_dir='.'):
+    '''
+    Get the amino acid sequence of every protein chain in a structure,
+    read from its modeled residues (in chain order, so any unmodeled
+    stretch is simply absent). Modified residues are converted to their
+    parent amino acid (e.g. selenomethionine MSE -> M); anything
+    unrecognized becomes 'X'.
+
+    Parameters
+    ----------
+    PDB ID or path to a local structure file: str
+    directory to store PDB file: str (optional, ignored for a local file)
+
+    Returns
+    -------
+    dict
+        Mapping of protein chain ID -> one-letter sequence.
+
+    Examples
+    --------
+    >>> chain_seqs = get_chain_sequences('6YW7', '.')
+    Downloading PDB structure '6yw7'...
+    >>> sorted(chain_seqs.keys())
+    ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+    '''
+    from Bio.Data.PDBData import protein_letters_3to1_extended
+
+    model = _load_pdb_model(PDB_ID_structure_i, protein_structure_dir)
+    chain_seqs = {}
+    for chain in model:
+        if classify_chain(chain) != 'protein':
+            continue
+        chain_seqs[chain.get_id()] = ''.join(
+            protein_letters_3to1_extended.get(residue.get_resname().strip().upper(), 'X')
+            for residue in chain if residue.id[0] == ' ')
+    return chain_seqs
+
+
+def fetch_uniprot_sequences(uniprot_IDs_list):
+    '''
+    Download the sequences of the given UniProt accessions from the
+    UniProt REST API (rest.uniprot.org). Isoform accessions (e.g.
+    'Q92747-2') fetch that isoform's sequence. Only public accessions are
+    sent; no structure data leaves the machine.
+
+    Parameters
+    ----------
+    UniProt IDs: list
+
+    Returns
+    -------
+    dict
+        Mapping of accession -> sequence.
+
+    Examples
+    --------
+    >>> seqs = fetch_uniprot_sequences(['P61160'])
+    >>> len(seqs['P61160'])
+    394
+    '''
+    sequences = {}
+    for uniprot_id in uniprot_IDs_list:
+        response = requests.get(f'https://rest.uniprot.org/uniprotkb/{uniprot_id}.fasta')
+        if response.status_code != 200 or not response.text.startswith('>'):
+            raise ValueError(f"Could not fetch UniProt sequence for '{uniprot_id}' "
+                             f'(HTTP {response.status_code}).')
+        sequences[uniprot_id] = ''.join(response.text.strip().split('\n')[1:])
+    return sequences
+
+
+def map_chains_to_uniprot(PDB_ID_structure_i, uniprot_IDs_list,
+                          protein_structure_dir='.', min_identity=0.9,
+                          min_coverage=0.5, uniprot_sequences=None):
+    '''
+    Work out which of a given set of UniProt proteins each protein chain
+    of a structure is, by sequence -- for structures that have no SIFTS
+    mapping, e.g. a user's own experimental model or an AlphaFold3/Boltz/
+    ColabFold prediction. The result can be passed straight to
+    PDB_to_interacting_chains_uniprot_maps(chain_to_uniprot=...) or the
+    Figure 2 render functions.
+
+    Each chain is compared with every candidate: an exact substring match
+    first (the usual case for predictions, which are folded from the
+    UniProt sequence), then a local alignment (BLOSUM62) for experimental
+    constructs with truncations, tags, mutations, or a non-human ortholog.
+    Unknown residues (UNK/'X', e.g. backbone traced in a cryo-EM map
+    without a sequence assignment) carry no identity information and are
+    left out of the comparison; their count is reported.
+    The best-scoring candidate (identity x coverage) is accepted if it
+    passes both thresholds. Chains are matched independently, so several
+    chains (a homo-oligomer) can map to the same protein.
+
+    Parameters
+    ----------
+    PDB ID or path to a local structure file: str
+    UniProt IDs of the candidate proteins: list
+    directory to store PDB file: str (optional, ignored for a local file)
+    min_identity: float (optional)
+        Minimum fraction of aligned chain residues identical to the
+        UniProt sequence.
+    min_coverage: float (optional)
+        Minimum fraction of the chain's modeled (non-UNK) residues that align to
+        the UniProt sequence (a long tag or fusion lowers this).
+    uniprot_sequences: dict (optional)
+        Accession -> sequence, to skip downloading them (e.g. offline).
+
+    Returns
+    -------
+    dict
+        Chain ID -> [UniProt ID] for every chain that passed.
+    Pandas DataFrame
+        One row per protein chain: the best match and runner-up, with
+        identity, chain coverage, UniProt coverage, whether it was
+        accepted, and how the match was made ('exact'/'alignment').
+        Check this for anything unexpected before trusting the mapping.
+
+    Examples
+    --------
+    >>> chain_map, report = map_chains_to_uniprot('6YW7', ['P61158', 'P61160', 'Q92747', 'O15144', 'O15145', 'P59998', 'O15511'], '.')
+    Downloading PDB structure '6yw7'...
+    >>> chain_map['C']
+    ['Q92747']
+    '''
+    from Bio.Align import PairwiseAligner, substitution_matrices
+
+    chain_seqs = get_chain_sequences(PDB_ID_structure_i, protein_structure_dir)
+    if uniprot_sequences is None:
+        uniprot_sequences = fetch_uniprot_sequences(uniprot_IDs_list)
+
+    aligner = PairwiseAligner(mode='local',
+                              substitution_matrix=substitution_matrices.load('BLOSUM62'),
+                              open_gap_score=-10, extend_gap_score=-0.5)
+
+    def compare(chain_seq, uniprot_seq):
+        if not chain_seq:  # chain is entirely unknown residues
+            return 0.0, 0.0, 0.0, None
+        if chain_seq in uniprot_seq:
+            return 1.0, 1.0, len(chain_seq) / len(uniprot_seq), 'exact'
+        alignment = next(iter(aligner.align(chain_seq, uniprot_seq)))
+        counts = alignment.counts()
+        n_aligned = counts.identities + counts.mismatches
+        if n_aligned == 0:
+            return 0.0, 0.0, 0.0, 'alignment'
+        uniprot_aligned = sum(end - start for start, end in alignment.aligned[1])
+        return (counts.identities / n_aligned, n_aligned / len(chain_seq),
+                uniprot_aligned / len(uniprot_seq), 'alignment')
+
+    chain_map = {}
+    report_rows = []
+    for chain_id, chain_seq_raw in chain_seqs.items():
+        chain_seq = chain_seq_raw.replace('X', '')
+        scored = []
+        for uniprot_id in uniprot_IDs_list:
+            identity, chain_cov, uniprot_cov, method = compare(
+                chain_seq, uniprot_sequences[uniprot_id])
+            scored.append((identity * chain_cov, uniprot_id, identity, chain_cov,
+                           uniprot_cov, method))
+        scored.sort(reverse=True)
+        best = scored[0] if scored else (0.0, None, 0.0, 0.0, 0.0, None)
+        runner_up = scored[1] if len(scored) > 1 else (0.0, None, 0.0, 0.0, 0.0, None)
+        accepted = (best[1] is not None and best[2] >= min_identity
+                    and best[3] >= min_coverage)
+        if accepted:
+            chain_map[chain_id] = [_strip_isoform(best[1])]
+        report_rows.append(dict(
+            chain=chain_id, chain_length=len(chain_seq_raw),
+            unknown_residues=len(chain_seq_raw) - len(chain_seq), uniprot=best[1],
+            identity=round(best[2], 3), chain_coverage=round(best[3], 3),
+            uniprot_coverage=round(best[4], 3), method=best[5], accepted=accepted,
+            runner_up=runner_up[1], runner_up_identity=round(runner_up[2], 3),
+            runner_up_chain_coverage=round(runner_up[3], 3)))
+
+    return chain_map, pd.DataFrame(report_rows)
+
+
+def _bioplex_edges_and_roles(bp_PPI_df, restrict_to=None):
+    '''
+    Internal helper: the undirected set of BioPlex-detected pairs
+    (isoform suffixes stripped, as frozensets), plus the sets of baits
+    (UniprotA) and preys (UniprotB). If restrict_to is given, only pairs
+    with both proteins in it are kept. Shared by the Figure 2 BioPlex
+    panels and compare_structure_contacts_to_BioPlex().
+    '''
+    restrict_to = set(restrict_to) if restrict_to is not None else None
+    edges, baits, preys = set(), set(), set()
+    for uniprot_A, uniprot_B in zip(bp_PPI_df.UniprotA, bp_PPI_df.UniprotB):
+        uniprot_A = uniprot_A.split('-')[0]
+        uniprot_B = uniprot_B.split('-')[0]
+        if restrict_to is not None and not (uniprot_A in restrict_to
+                                            and uniprot_B in restrict_to):
+            continue
+        edges.add(frozenset((uniprot_A, uniprot_B)))
+        baits.add(uniprot_A)
+        preys.add(uniprot_B)
+    return edges, baits, preys
+
+
+def _bioplex_symbol_lookup(*bp_PPI_dfs):
+    '''
+    Internal helper: UniProt accession (isoform suffix stripped) -> gene
+    symbol, taken from BioPlex DataFrames.
+    '''
+    symbol_lookup = {}
+    for df in bp_PPI_dfs:
+        for uniprot_A, symbol_A in zip(df.UniprotA, df.SymbolA):
+            symbol_lookup[uniprot_A.split('-')[0]] = symbol_A
+        for uniprot_B, symbol_B in zip(df.UniprotB, df.SymbolB):
+            symbol_lookup[uniprot_B.split('-')[0]] = symbol_B
+    return symbol_lookup
+
+
+def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
+                                          interacting_UniProt_IDs, chain_types,
+                                          bp_293t_df, bp_hct116_df):
+    '''
+    Tabulate how a structure's direct protein-protein contacts line up
+    with BioPlex AP-MS interactions in both cell lines -- the numbers
+    behind the Figure 2-style panels, for scripted/batch use.
+
+    Takes the three outputs of PDB_to_interacting_chains_uniprot_maps()
+    (which accepts either a PDB ID or a local structure file).
+
+    Parameters
+    ----------
+    Chain to UniProt Map: dict
+    Interacting UniProt/synthetic IDs: list
+    Chain Types: dict
+    DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
+    DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
+
+    Returns
+    -------
+    Pandas DataFrame
+        One row per pair of proteins in the structure that is a direct
+        contact in the structure, a BioPlex interaction in either cell
+        line, or both. Columns: UniprotA, UniprotB, SymbolA, SymbolB,
+        structure_contact, bioplex_293T, bioplex_HCT116. Nucleic acid and
+        unmapped chains are left out (AP-MS can't detect them).
+
+    Examples
+    --------
+    >>> from bioplexpy import getBioPlex
+    >>> bp_293t_df = getBioPlex('293T', '3.0')
+    >>> bp_hct116_df = getBioPlex('HCT116', '1.0')
+    >>> maps = PDB_to_interacting_chains_uniprot_maps('6YW7', '.', 6)
+    Downloading PDB structure '6yw7'...
+    >>> contacts_df = compare_structure_contacts_to_BioPlex(*maps, bp_293t_df, bp_hct116_df)
+    >>> int(contacts_df.structure_contact.sum())
+    9
+    '''
+    protein_ids = sorted({id_i for chain_id, ids in chain_to_UniProt_mapping_dict.items()
+                          if chain_types.get(chain_id, 'protein') == 'protein'
+                          for id_i in ids if not id_i.startswith('UNMAPPED:')})
+    contacts = {frozenset(pair) for pair in interacting_UniProt_IDs
+                if pair[0] in protein_ids and pair[1] in protein_ids}
+    edges_293t, _, _ = _bioplex_edges_and_roles(bp_293t_df, restrict_to=protein_ids)
+    edges_hct116, _, _ = _bioplex_edges_and_roles(bp_hct116_df, restrict_to=protein_ids)
+    symbols = _bioplex_symbol_lookup(bp_293t_df, bp_hct116_df)
+
+    rows = []
+    for pair in contacts | edges_293t | edges_hct116:
+        if len(pair) != 2:
+            continue
+        uniprot_A, uniprot_B = sorted(pair)
+        rows.append(dict(UniprotA=uniprot_A, UniprotB=uniprot_B,
+                         SymbolA=symbols.get(uniprot_A, uniprot_A),
+                         SymbolB=symbols.get(uniprot_B, uniprot_B),
+                         structure_contact=pair in contacts,
+                         bioplex_293T=pair in edges_293t,
+                         bioplex_HCT116=pair in edges_hct116))
+    columns = ['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
+               'bioplex_293T', 'bioplex_HCT116']
+    return (pd.DataFrame(rows, columns=columns)
+            .sort_values(['structure_contact', 'SymbolA', 'SymbolB'],
+                         ascending=[False, True, True])
+            .reset_index(drop=True))

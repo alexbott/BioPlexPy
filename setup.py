@@ -15,4 +15,5 @@ setup(
    author_email='roger_vargas@g.harvard.edu',
    packages=['bioplexpy'],  #same as name
    install_requires=['pandas','requests','anndata','networkx','numpy','matplotlib','biopython','scipy','pypdb','py3Dmol'], #external packages as dependencies
+   entry_points={'console_scripts': ['bioplexpy-structure=bioplexpy.cli:main']},
 )

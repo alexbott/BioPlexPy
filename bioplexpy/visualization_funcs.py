@@ -2,7 +2,9 @@
 
 import itertools
 import os
+import re
 import tempfile
+import warnings
 
 import matplotlib.colors
 import matplotlib.image as mpimg
@@ -981,7 +983,7 @@ def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_pale
 
     Parameters
     ----------
-    PDB ID: str
+    PDB ID or path to a local structure file: str
     directory to store PDB file: str
     Chain Color Palette: dict
     width: int (optional)
@@ -1008,13 +1010,14 @@ def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_pale
     py3Dmol.view
         Call .show() on this in a Jupyter notebook to render it.
     '''
-    from bioplexpy.analysis_funcs import fetch_pdb_structure_file
+    from bioplexpy.analysis_funcs import fetch_pdb_structure_file, structure_label
     pdb_file_path, file_format = fetch_pdb_structure_file(PDB_ID, protein_structure_dir)
+    label = structure_label(PDB_ID)
 
     if rotation is not None:
         with tempfile.TemporaryDirectory() as tmpdir:
             rotated_ext = 'cif' if file_format == 'mmCif' else 'pdb'
-            rotated_path = os.path.join(tmpdir, f'{PDB_ID}_rotated.{rotated_ext}')
+            rotated_path = os.path.join(tmpdir, f'{label}_rotated.{rotated_ext}')
             _write_rotated_structure(pdb_file_path, file_format, rotation, center,
                                      rotated_path)
             with open(rotated_path) as pdb_file:
@@ -1146,14 +1149,8 @@ def display_BioPlex_direct_interactions(ax, chain_to_UniProt_mapping_dict,
     all_ids = sorted({id_i for ids in chain_to_UniProt_mapping_dict.values() for id_i in ids})
 
     # strip isoform suffixes and build an undirected set of BioPlex-detected pairs
-    bp_edges = set()
-    baits, preys = set(), set()
-    for uniprot_A, uniprot_B in zip(bp_PPI_df.UniprotA, bp_PPI_df.UniprotB):
-        uniprot_A = uniprot_A.split('-')[0]
-        uniprot_B = uniprot_B.split('-')[0]
-        bp_edges.add(frozenset((uniprot_A, uniprot_B)))
-        baits.add(uniprot_A)
-        preys.add(uniprot_B)
+    from bioplexpy.analysis_funcs import _bioplex_edges_and_roles
+    bp_edges, baits, preys = _bioplex_edges_and_roles(bp_PPI_df)
 
     G = nx.Graph()
     G.add_nodes_from(all_ids)
@@ -1235,20 +1232,11 @@ def display_All_BioPlex_interactions_two_cell_lines(ax, protein_ids,
         direct_width = edge_width
     if indirect_width is None:
         indirect_width = edge_width * 0.4
-    def edges_and_roles(df):
-        edges, baits, preys = set(), set(), set()
-        protein_ids_set = set(protein_ids)
-        for uniprot_A, uniprot_B in zip(df.UniprotA, df.UniprotB):
-            uniprot_A = uniprot_A.split('-')[0]
-            uniprot_B = uniprot_B.split('-')[0]
-            if uniprot_A in protein_ids_set and uniprot_B in protein_ids_set:
-                edges.add(frozenset((uniprot_A, uniprot_B)))
-                baits.add(uniprot_A)
-                preys.add(uniprot_B)
-        return edges, baits, preys
-
-    edges_293t, baits_293t, preys_293t = edges_and_roles(bp_293t_df)
-    edges_hct116, baits_hct116, preys_hct116 = edges_and_roles(bp_hct116_df)
+    from bioplexpy.analysis_funcs import _bioplex_edges_and_roles
+    edges_293t, baits_293t, preys_293t = _bioplex_edges_and_roles(
+        bp_293t_df, restrict_to=protein_ids)
+    edges_hct116, baits_hct116, preys_hct116 = _bioplex_edges_and_roles(
+        bp_hct116_df, restrict_to=protein_ids)
     all_edges = edges_293t | edges_hct116
 
     G = nx.Graph()
@@ -1303,7 +1291,8 @@ def display_All_BioPlex_interactions_two_cell_lines(ax, protein_ids,
 
 
 def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
-                            interact_dist_threshold):
+                            interact_dist_threshold, chain_to_uniprot=None,
+                            min_plddt=None):
     '''
     Internal helper: everything render_figure2_panels() and
     render_figure2_panels_static() both need -- the PDB-direct/UniProt
@@ -1312,11 +1301,14 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     drift out of sync with each other.
     '''
     from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
+                                          _bioplex_symbol_lookup,
                                           get_chain_centroids)
 
     chain_to_uniprot, interacting_uniprot_ids, chain_types = (
         PDB_to_interacting_chains_uniprot_maps(PDB_ID, protein_structure_dir,
-                                               interact_dist_threshold))
+                                               interact_dist_threshold,
+                                               chain_to_uniprot=chain_to_uniprot,
+                                               min_plddt=min_plddt))
 
     chain_color_palette = get_chain_color_palette(list(chain_types.keys()))
     node_color_palette = get_uniprot_color_palette(chain_to_uniprot, chain_color_palette)
@@ -1335,12 +1327,7 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     all_ids = sorted({id_i for ids in chain_to_uniprot.values() for id_i in ids})
 
     # gene symbol labels where available, straight from the BioPlex dataframes
-    symbol_lookup = {}
-    for df in (bp_293t_df, bp_hct116_df):
-        for uniprot_A, symbol_A in zip(df.UniprotA, df.SymbolA):
-            symbol_lookup[uniprot_A.split('-')[0]] = symbol_A
-        for uniprot_B, symbol_B in zip(df.UniprotB, df.SymbolB):
-            symbol_lookup[uniprot_B.split('-')[0]] = symbol_B
+    symbol_lookup = _bioplex_symbol_lookup(bp_293t_df, bp_hct116_df)
     labels = {id_i: symbol_lookup.get(id_i, id_i) for id_i in all_ids}
 
     return dict(
@@ -1361,6 +1348,7 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
 def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df,
                                  bp_hct116_df, prepared, node_size, edge_width,
                                  node_font_size):
+    from bioplexpy.analysis_funcs import is_local_structure_file
     '''
     Internal helper: draw the three network panels (PDB direct / BioPlex
     direct / all BioPlex) onto the given 3 axes, using inputs already
@@ -1372,7 +1360,9 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
         axes[0], prepared['chain_to_uniprot'], prepared['interacting_uniprot_ids'],
         prepared['chain_types'], prepared['node_color_palette'], node_size, edge_width,
         node_font_size, labels=prepared['labels'], node_pos=prepared['structure_layout'])
-    axes[0].set_title('PDB Direct Interaction Network')
+    # a user's own file may be a prediction, not a PDB entry
+    source = 'Model' if is_local_structure_file(PDB_ID) else 'PDB'
+    axes[0].set_title(f'{source} Direct Interaction Network')
     axes[0].axis('off')
 
     display_BioPlex_direct_interactions(
@@ -1396,7 +1386,7 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
 
 def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
     interact_dist_threshold=6, figsize=(16, 5.5), node_size=1400,
-    edge_width=2.5, node_font_size=9):
+    edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt=None):
     '''
     Reproduce Figure 2F-H of Huttlin et al. 2021 for a given PDB structure:
     finds direct interactions from the structure, overlays BioPlex AP-MS
@@ -1412,7 +1402,7 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
 
     Parameters
     ----------
-    PDB ID: str
+    PDB ID or path to a local structure file: str
     directory to store PDB file: str
     DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
     DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
@@ -1421,6 +1411,13 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     Size of Nodes in Network: int (optional)
     Width of Edges in Network: float (optional)
     Size of font for Node Labels: int (optional)
+    chain_to_uniprot: dict (optional)
+        Chain ID -> UniProt ID(s). Required when PDB_ID is a local
+        structure file (which has no SIFTS mapping); see
+        PDB_to_interacting_chains_uniprot_maps().
+    min_plddt: float (optional)
+        For predicted structures: ignore atoms below this pLDDT when
+        finding direct contacts (see PDB_to_interacting_chains_uniprot_maps()).
 
     Returns
     -------
@@ -1430,7 +1427,9 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
         Interactive, chain-colored 3D render of the structure (column 1).
     '''
     prepared = _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df,
-                                       bp_hct116_df, interact_dist_threshold)
+                                       bp_hct116_df, interact_dist_threshold,
+                                       chain_to_uniprot=chain_to_uniprot,
+                                       min_plddt=min_plddt)
     structure_view = render_pdb_structure_py3Dmol(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         rotation=prepared['structure_rotation'], center=prepared['structure_center'])
@@ -1558,7 +1557,7 @@ def render_pdb_structure_static(PDB_ID, protein_structure_dir, chain_color_palet
 
     Parameters
     ----------
-    PDB ID: str
+    PDB ID or path to a local structure file: str
     directory to store PDB file: str
     Chain Color Palette: dict (e.g. from get_chain_color_palette())
     width, height: int (optional)
@@ -1593,15 +1592,16 @@ def render_pdb_structure_static(PDB_ID, protein_structure_dir, chain_color_palet
             "'pymol-open-source' package: pip install pymol-open-source"
         ) from e
 
-    from bioplexpy.analysis_funcs import fetch_pdb_structure_file
+    from bioplexpy.analysis_funcs import fetch_pdb_structure_file, structure_label
     pdb_file_path, file_format = fetch_pdb_structure_file(PDB_ID, protein_structure_dir)
+    label = structure_label(PDB_ID)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        png_path = os.path.join(tmpdir, f'{PDB_ID}.png')
+        png_path = os.path.join(tmpdir, f'{label}.png')
 
         if rotation is not None:
             rotated_ext = 'cif' if file_format == 'mmCif' else 'pdb'
-            render_source_path = os.path.join(tmpdir, f'{PDB_ID}_rotated.{rotated_ext}')
+            render_source_path = os.path.join(tmpdir, f'{label}_rotated.{rotated_ext}')
             _write_rotated_structure(pdb_file_path, file_format, rotation, center,
                                      render_source_path)
         else:
@@ -1611,7 +1611,13 @@ def render_pdb_structure_static(PDB_ID, protein_structure_dir, chain_color_palet
         session.start()
         try:
             cmd = session.cmd
-            cmd.load(render_source_path, PDB_ID)
+            cmd.load(render_source_path, label)
+            # files with no secondary-structure records (common for
+            # predictions, e.g. AlphaFold3/Boltz mmCIF, and some RCSB
+            # mmCIFs) would otherwise draw as bare loops; let PyMOL
+            # assign it. Files that do carry it are left as deposited.
+            if cmd.count_atoms(f'{label} and name CA and ss H+S') == 0:
+                cmd.dss(label)
             cmd.hide('everything')
             cmd.show('cartoon')
             cmd.bg_color('white')
@@ -1631,9 +1637,27 @@ def render_pdb_structure_static(PDB_ID, protein_structure_dir, chain_color_palet
         return mpimg.imread(png_path)
 
 
+def _wrap_title(title, width=40):
+    '''
+    Internal helper: break a long panel title (e.g. a predictor's output
+    file name, which has no spaces) onto several lines at '_'/'-'/' '
+    boundaries, so it stays within its own panel instead of running into
+    the next one.
+    '''
+    lines, line = [], ''
+    for token in re.findall(r'[^_\- ]+[_\- ]*|[_\- ]+', title):
+        if line and len(line) + len(token) > width:
+            lines.append(line)
+            line = ''
+        line += token
+    lines.append(line)
+    return '\n'.join(lines)
+
+
 def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
     interact_dist_threshold=6, figsize=(20, 5.5), node_size=1400, edge_width=2.5,
-    node_font_size=9, structure_width=800, structure_height=800):
+    node_font_size=9, structure_width=800, structure_height=800,
+    chain_to_uniprot=None, min_plddt=None):
     '''
     Like render_figure2_panels(), but produces a single static, 4-panel
     matplotlib Figure -- the PDB structure (via PyMOL,
@@ -1645,7 +1669,7 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
 
     Parameters
     ----------
-    PDB ID: str
+    PDB ID or path to a local structure file: str
     directory to store PDB file: str
     DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
     DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
@@ -1656,6 +1680,13 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     Size of font for Node Labels: int (optional)
     structure_width, structure_height: int (optional)
         Ray-traced structure image dimensions in pixels.
+    chain_to_uniprot: dict (optional)
+        Chain ID -> UniProt ID(s). Required when PDB_ID is a local
+        structure file (which has no SIFTS mapping); see
+        PDB_to_interacting_chains_uniprot_maps().
+    min_plddt: float (optional)
+        For predicted structures: ignore atoms below this pLDDT when
+        finding direct contacts (see PDB_to_interacting_chains_uniprot_maps()).
 
     Returns
     -------
@@ -1663,7 +1694,9 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
         Matplotlib Figure with all four panels.
     '''
     prepared = _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df,
-                                       bp_hct116_df, interact_dist_threshold)
+                                       bp_hct116_df, interact_dist_threshold,
+                                       chain_to_uniprot=chain_to_uniprot,
+                                       min_plddt=min_plddt)
     structure_image = render_pdb_structure_static(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         width=structure_width, height=structure_height,
@@ -1672,7 +1705,8 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     fig, axes = plt.subplots(1, 4, figsize=figsize)
 
     axes[0].imshow(structure_image)
-    axes[0].set_title(f'{PDB_ID} Structure')
+    from bioplexpy.analysis_funcs import structure_label
+    axes[0].set_title(_wrap_title(f'{structure_label(PDB_ID)} Structure'))
     axes[0].axis('off')
 
     _draw_figure2_network_panels(axes[1:], PDB_ID, protein_structure_dir, bp_293t_df,
@@ -1762,3 +1796,65 @@ def render_figure2_panels_for_uniprots(uniprot_IDs_list, protein_structure_dir,
 
     render_fn = render_figure2_panels_static if static else render_figure2_panels
     return render_fn(pdb_id, protein_structure_dir, bp_293t_df, bp_hct116_df, **kwargs)
+
+def render_figure2_panels_from_file(structure_file, bp_293t_df, bp_hct116_df,
+                                    chain_to_uniprot=None, uniprot_IDs_list=None,
+                                    min_plddt=None, static=True, **kwargs):
+    '''
+    Render the Figure 2-style panels for a user's own structure file --
+    an experimental model, or a prediction from AlphaFold3, Boltz,
+    ColabFold/AF2-Multimer, etc. -- rather than an RCSB entry.
+
+    A local file has no SIFTS chain-to-UniProt mapping, so give either:
+    - chain_to_uniprot: the mapping itself, e.g. {'A': 'P61158', ...}
+      (values may also be free-text labels for chains that aren't human
+      proteins), or
+    - uniprot_IDs_list: the proteins in the complex, and each chain is
+      matched to one of them by sequence (see map_chains_to_uniprot();
+      call that directly to inspect the per-chain match report first).
+    Chains left unmapped are drawn with an 'UNMAPPED:<chain>' label.
+
+    Parameters
+    ----------
+    path to a .pdb/.ent/.cif/.mmcif file: str
+    DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
+    DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
+    chain_to_uniprot: dict (optional)
+    uniprot_IDs_list: list (optional)
+    min_plddt: float (optional)
+        For predicted structures: ignore atoms below this pLDDT (0-100)
+        when finding direct contacts, so low-confidence regions can't
+        create spurious contacts. Leave unset for experimental structures.
+    static: bool (optional, default True)
+        As in render_figure2_panels_for_uniprots(): True renders one
+        static Figure via render_figure2_panels_static() (needs
+        pymol-open-source); False uses render_figure2_panels().
+    **kwargs
+        Passed through to the render function (e.g. figsize,
+        interact_dist_threshold).
+
+    Returns
+    -------
+    Whatever the chosen render function returns:
+    render_figure2_panels_static() -> Figure
+    render_figure2_panels() -> (Figure, py3Dmol.view)
+    '''
+    from bioplexpy.analysis_funcs import is_local_structure_file, map_chains_to_uniprot
+
+    if not is_local_structure_file(structure_file):
+        raise FileNotFoundError(f"No such structure file: '{structure_file}'")
+    if chain_to_uniprot is None:
+        if uniprot_IDs_list is None:
+            raise ValueError('Give either chain_to_uniprot or uniprot_IDs_list, so '
+                             'the chains can be matched to BioPlex proteins.')
+        chain_to_uniprot, report = map_chains_to_uniprot(structure_file,
+                                                         uniprot_IDs_list)
+        rejected = report[~report.accepted]
+        if len(rejected):
+            warnings.warn('Chain(s) not confidently matched by sequence, left '
+                          f'unmapped: {list(rejected.chain)}. Inspect '
+                          'map_chains_to_uniprot() output for details.')
+
+    render_fn = render_figure2_panels_static if static else render_figure2_panels
+    return render_fn(structure_file, None, bp_293t_df, bp_hct116_df,
+                     chain_to_uniprot=chain_to_uniprot, min_plddt=min_plddt, **kwargs)
