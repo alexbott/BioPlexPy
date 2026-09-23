@@ -1200,7 +1200,7 @@ def render_pdb_structure_py3Dmol(PDB_ID, protein_structure_dir, chain_color_pale
 def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
     interacting_UniProt_IDs, chain_types, node_color_palette, node_size,
     edge_width, node_font_size=10, node_pos=None, labels=None,
-    edge_color='0.3', edge_scores=None, confidence_style='width',
+    edge_color='0.3', edge_scores=None, confidence_style='alpha',
     confidence_label=None):
     '''
     Display the PDB-derived direct interaction network for a structure
@@ -1233,8 +1233,8 @@ def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
         frozenset({id_i, id_j}) -> score in 0-1, e.g. from
         get_edge_confidence_scores(). Edges without a score are drawn plain.
     confidence_style: str (optional)
-        How edge_scores are shown: 'width' (line width grows with the
-        score; default), 'alpha' (low scores fade) or 'color' (viridis
+        How edge_scores are shown: 'alpha' (low scores fade; default),
+        'width' (line width grows with the score) or 'color' (viridis
         colormap with a colorbar).
     confidence_label: str (optional)
         Title for the score key, e.g. 'AlphaFold3 chain-pair ipTM'.
@@ -1552,7 +1552,7 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
 
 def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df,
                                  bp_hct116_df, prepared, node_size, edge_width,
-                                 node_font_size, confidence_style='width'):
+                                 node_font_size, confidence_style='alpha'):
     from bioplexpy.analysis_funcs import is_local_structure_file
     '''
     Internal helper: draw the three network panels (PDB direct / BioPlex
@@ -1599,7 +1599,7 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
 def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
     interact_dist_threshold=6, figsize=(16, 5.5), node_size=1400,
     edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt=None,
-    confidence_style='width', confidence_score='pair_iptm', confidence_reduce='mean'):
+    confidence_style='alpha', confidence_score='pair_iptm', confidence_reduce='mean'):
     '''
     Reproduce Figure 2F-H of Huttlin et al. 2021 for a given PDB structure:
     finds direct interactions from the structure, overlays BioPlex AP-MS
@@ -1634,7 +1634,7 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     confidence_style: str or None (optional)
         For a predicted model whose predictor wrote per-interface scores
         next to it (see read_interface_confidence()): how the model
-        network's edges show them -- 'width' (default), 'alpha' or
+        network's edges show them -- 'alpha' (default), 'width' or
         'color'; None draws plain edges. No effect on experimental
         structures. Annotation only: no edge is removed.
     confidence_score: str (optional)
@@ -1886,7 +1886,7 @@ def _wrap_title(title, width=40):
 def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
     interact_dist_threshold=6, figsize=(20, 5.5), node_size=1400, edge_width=2.5,
     node_font_size=9, structure_width=800, structure_height=800,
-    chain_to_uniprot=None, min_plddt=None, confidence_style='width',
+    chain_to_uniprot=None, min_plddt=None, confidence_style='alpha',
     confidence_score='pair_iptm', confidence_reduce='mean'):
     '''
     Like render_figure2_panels(), but produces a single static, 4-panel
@@ -1920,7 +1920,7 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     confidence_style: str or None (optional)
         For a predicted model whose predictor wrote per-interface scores
         next to it (see read_interface_confidence()): how the model
-        network's edges show them -- 'width' (default), 'alpha' or
+        network's edges show them -- 'alpha' (default), 'width' or
         'color'; None draws plain edges. No effect on experimental
         structures. Annotation only: no edge is removed.
     confidence_score: str (optional)

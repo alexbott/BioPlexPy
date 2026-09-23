@@ -11,9 +11,10 @@ For each structure file this writes, into --out-dir:
                         models (AF3/Boltz pair ipTM; ipSAE/pDockQ/pDockQ2 if
                         a ColabFold scores file holds them)
   <name>_chain_map.tsv  which UniProt protein each chain was assigned
-  <name>_figure.png     the Figure 2-style panels (unless --no-render); for a
-                        predicted model with chain-pair scores, one figure
-                        per --confidence-style: <name>_figure_<style>.png
+  <name>_figure.png     the Figure 2-style panels (unless --no-render); a
+                        predicted model's chain-pair scores are shown as edge
+                        opacity by default; with several --confidence-style
+                        values, one figure each: <name>_figure_<style>.png
   <name>_structure.html interactive py3Dmol view (--interactive only)
 and, when two or more structures are processed:
   summary_contacts.tsv  every protein pair, how many of the models have it
@@ -352,12 +353,13 @@ def build_parser():
 
     confidence = parser.add_argument_group(
         'interface confidence (predicted models; shown, never used to drop edges)')
-    confidence.add_argument('--confidence-style', nargs='+', default=['width', 'alpha', 'color'],
+    confidence.add_argument('--confidence-style', nargs='+', default=['alpha'],
                             choices=['width', 'alpha', 'color', 'none'],
                             help="how the model network's edges show the predictor's "
-                                 'chain-pair score: line width, opacity, or viridis '
-                                 'color; several give one figure each (default: all '
-                                 'three); none = plain edges')
+                                 'chain-pair score: opacity (default), line width, or '
+                                 'viridis color; several give one figure each, named '
+                                 '<name>_figure_<style>.png (e.g. --confidence-style '
+                                 'alpha width color to compare); none = plain edges')
     confidence.add_argument('--confidence-score', default='pair_iptm',
                             help='score to show: pair_iptm (AlphaFold3/Boltz; default), '
                                  'or ipsae/pdockq/pdockq2 if a ColabFold scores file '
