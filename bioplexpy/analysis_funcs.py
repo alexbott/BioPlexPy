@@ -642,10 +642,11 @@ def is_local_structure_file(structure):
     return os.path.isfile(structure)
 
 
-def find_structure_files(path):
+def find_structure_files(path, extract_dir=None):
     '''
     Find the model files in a structure predictor's output, as written by
-    the tool -- or in any directory of structure files.
+    the tool -- a folder, or the .zip the AlphaFold3 server downloads --
+    or in any directory of structure files.
 
     A directory is searched at its top level (.pdb/.ent/.cif/.mmcif),
     which covers the AlphaFold3 server (model_0..4.cif at the top, with
@@ -666,9 +667,17 @@ def find_structure_files(path):
     If nothing is found, any structure files in subfolders are listed in
     the returned notes, so the right folder can be given instead.
 
+    A .zip archive is handled like the folder it contains: only its
+    structure files are extracted (not MSAs, JSON, or template hits), into
+    extract_dir, and the same layout rules are applied there.
+
     Parameters
     ----------
-    path to a structure file or a directory: str
+    path to a structure file, a directory, or a .zip archive: str
+    extract_dir: str (optional)
+        Where to extract a .zip's structure files. Defaults to a new
+        temporary directory (named in the returned notes), which is not
+        deleted automatically.
 
     Returns
     -------
@@ -692,6 +701,8 @@ def find_structure_files(path):
                       if f.lower().endswith(exts)
                       and os.path.isfile(os.path.join(directory, f)))
 
+    if str(path).lower().endswith('.zip') and os.path.isfile(path):
+        return _find_structure_files_in_zip(path, extract_dir)
     if os.path.isfile(path):
         return [str(path)], [], []
     if not os.path.isdir(path):
@@ -746,7 +757,52 @@ def find_structure_files(path):
                          'the folder that holds the models themselves.')
         else:
             notes.append(f'No structure files found in {path}')
+        zips = [f for f in os.listdir(path) if f.lower().endswith('.zip')]
+        if zips:
+            notes.append(f'{path} holds .zip archive(s) ({", ".join(zips[:3])}) -- '
+                         'pass the .zip itself to read the models inside it.')
     return sorted(files), notes, groups
+
+
+def _find_structure_files_in_zip(zip_path, extract_dir=None):
+    '''
+    Internal helper for find_structure_files(): extract just the
+    structure files from a .zip (skipping template hits and anything
+    whose path would land outside extract_dir), then apply the same
+    layout rules to the extracted tree.
+    '''
+    import tempfile
+    import zipfile
+
+    exts = tuple(_LOCAL_STRUCTURE_FORMATS)
+    if extract_dir is None:
+        extract_dir = tempfile.mkdtemp(prefix='bioplexpy_zip_')
+    root = os.path.realpath(extract_dir)
+    notes, n_extracted = [], 0
+    with zipfile.ZipFile(zip_path) as archive:
+        members = [m for m in archive.infolist()
+                   if not m.is_dir() and m.filename.lower().endswith(exts)
+                   and 'templates' not in m.filename.split('/')[:-1]]
+        for member in members:
+            target = os.path.realpath(os.path.join(root, member.filename))
+            if not target.startswith(root + os.sep):
+                notes.append(f'Skipped unsafe path in archive: {member.filename}')
+                continue
+            archive.extract(member, root)
+            n_extracted += 1
+    notes.append(f'Extracted {n_extracted} structure file(s) from {zip_path} '
+                 f'into {root}')
+
+    # an archive of a single folder: look inside that folder
+    target_dir = root
+    entries = os.listdir(target_dir)
+    while (len(entries) == 1 and os.path.isdir(os.path.join(target_dir, entries[0]))
+           and not entries[0].startswith('boltz_results_')):
+        target_dir = os.path.join(target_dir, entries[0])
+        entries = os.listdir(target_dir)
+
+    files, more_notes, groups = find_structure_files(target_dir)
+    return files, notes + more_notes, groups
 
 
 def structure_label(structure):

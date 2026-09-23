@@ -28,7 +28,7 @@ import pandas as pd
 
 
 
-def _collect_structure_files(paths):
+def _collect_structure_files(paths, zip_extract_root):
     '''
     Expand each path into its model files with find_structure_files()
     (which recognizes AF3-server, ColabFold and Boltz output layouts),
@@ -36,16 +36,25 @@ def _collect_structure_files(paths):
     prediction inputs seen (Boltz predictions/<input> folder names).
     '''
     from bioplexpy.analysis_funcs import find_structure_files
-    files, inputs = [], set()
-    for path in paths:
-        found, notes, groups = find_structure_files(path)
+    files, inputs, display = [], set(), {}
+    for i, path in enumerate(paths):
+        # each .zip gets its own folder under this run's temporary directory
+        extract_dir = os.path.join(zip_extract_root, f'zip{i}')
+        found, notes, groups = find_structure_files(path, extract_dir=extract_dir)
+        for f in found:
+            # files extracted from a .zip are shown as <zip>:<member>, since
+            # the temporary copy is gone once the run ends
+            display[os.path.abspath(f)] = (
+                f'{path}:{os.path.relpath(f, extract_dir)}'
+                if os.path.abspath(f).startswith(os.path.abspath(extract_dir) + os.sep)
+                else f)
         for note in notes:
             print(note, file=sys.stderr)
         files.extend(found)
         inputs.update(os.path.basename(g) for g in groups)
     # the same file given twice (e.g. a folder and a file inside it)
     files = list(dict.fromkeys(os.path.abspath(f) for f in files))
-    return files, inputs
+    return files, inputs, display
 
 
 def _read_chain_map(pairs, map_file):
@@ -262,7 +271,9 @@ def build_parser():
                'Example: bioplexpy-structure models/ --uniprots P61158 P61160 '
                '--min-plddt 70')
     parser.add_argument('structures', nargs='+',
-                        help='.pdb/.ent/.cif/.mmcif files, or directories of them. '
+                        help='.pdb/.ent/.cif/.mmcif files, directories of them, or '
+                             '.zip archives (e.g. an AlphaFold3 server download; only '
+                             'its structure files are extracted, temporarily). '
                              'Raw predictor output folders can be given as-is: '
                              'AlphaFold3 server and ColabFold models are read from '
                              'the top of the folder (templates are ignored), Boltz '
@@ -320,7 +331,14 @@ def main(argv=None):
         parser.error('give a chain mapping (--chain-map/--chain-map-file) or the '
                      "complex's UniProt IDs (--uniprots/--uniprots-file)")
 
-    structure_files, prediction_inputs = _collect_structure_files(args.structures)
+    # .zip archives are extracted here for the run and removed afterwards
+    with tempfile.TemporaryDirectory(prefix='bioplexpy_zip_') as zip_extract_root:
+        return _run(parser, args, chain_map, uniprots, zip_extract_root)
+
+
+def _run(parser, args, chain_map, uniprots, zip_extract_root):
+    structure_files, prediction_inputs, display = _collect_structure_files(
+        args.structures, zip_extract_root)
     if not structure_files:
         parser.error('no structure files found')
     # one Boltz run over several input files holds several different
@@ -350,11 +368,11 @@ def main(argv=None):
         try:
             summary, contacts_df = process_structure(structure_file, name, args, chain_map,
                                         uniprots, bp_293t_df, bp_hct116_df)
-            print(f'{structure_file}: {summary}')
+            print(f'{display[structure_file]}: {summary}')
             contacts_by_name[name] = contacts_df
         except Exception as e:
             failures += 1
-            print(f'{structure_file}: FAILED -- {e}', file=sys.stderr)
+            print(f'{display[structure_file]}: FAILED -- {e}', file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
     if summarize and (len(contacts_by_name) >= 2 or (contacts_by_name and args.reference)):
