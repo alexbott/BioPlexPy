@@ -644,6 +644,46 @@ def _relax_overlapping_nodes(pos, min_separation, iterations=200, step=0.5):
     return {node_id: tuple(xy) for node_id, xy in zip(node_ids, coords)}
 
 
+def _separate_nodes_on_screen(ax, pos, node_size, gap_points=8, safety=1.15,
+                              rounds=3):
+    '''
+    Internal helper: move apart nodes whose markers would overlap once
+    drawn on `ax`. node_size is a marker *area in points^2*, fixed on
+    screen regardless of the data scale, so a minimum separation in
+    layout (data) units can't guarantee non-overlap -- whether 0.15 data
+    units is enough depends on how big the axes is and how spread out the
+    layout is. This works in points instead: the layout is converted to
+    on-screen points using the axes' size and the data span matplotlib
+    will autoscale to (the node extent plus its default 5% margins), any
+    pair closer than one node diameter plus gap_points is pushed apart
+    with _relax_overlapping_nodes() (which only moves colliding pairs),
+    and the result is converted back. Repeated a few rounds since moving
+    nodes can widen the data span. `safety` pads the separation because
+    the axes can still shrink slightly when fig.tight_layout() runs after
+    drawing.
+    '''
+    if len(pos) < 2:
+        return pos
+    bbox = ax.get_window_extent()
+    width_pt = bbox.width * 72 / ax.figure.dpi
+    height_pt = bbox.height * 72 / ax.figure.dpi
+    min_sep_points = (2 * np.sqrt(node_size / np.pi) + gap_points) * safety
+
+    node_ids = list(pos)
+    coords = np.array([pos[n] for n in node_ids], dtype=float)
+    for _ in range(rounds):
+        span = (coords.max(axis=0) - coords.min(axis=0)) * 1.1
+        span[span == 0] = 1.0
+        points_per_unit = np.array([width_pt, height_pt]) / span
+        in_points = {n: tuple(xy * points_per_unit) for n, xy in zip(node_ids, coords)}
+        relaxed = _relax_overlapping_nodes(in_points, min_separation=min_sep_points)
+        new_coords = np.array([relaxed[n] for n in node_ids]) / points_per_unit
+        if np.allclose(new_coords, coords):
+            break
+        coords = new_coords
+    return {n: tuple(xy) for n, xy in zip(node_ids, coords)}
+
+
 def _protein_centroids(chain_to_UniProt_mapping_dict, chain_centroids):
     '''
     Internal helper: average chain centroids per UniProt/synthetic ID, so
@@ -815,6 +855,10 @@ def _draw_outside_labels(ax, G, node_pos, labels, font_size, node_size,
     offset_points = node_radius_points + padding_points
 
     for node_i, (x, y) in node_pos.items():
+        # node_pos is shared across panels; only label nodes drawn in this
+        # one (e.g. the all-BioPlex panel leaves out DNA/RNA nodes)
+        if node_i not in G:
+            continue
         direction = np.array([x, y]) - centroid
         norm = np.linalg.norm(direction)
         unit = direction / norm if norm > 1e-9 else np.array([0.0, 1.0])
@@ -1356,10 +1400,14 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
     and render_figure2_panels_static() so the network-panel logic lives
     in exactly one place.
     '''
+    # all three panels share one layout and have the same size, so the
+    # screen-space separation is worked out once, on the first panel
+    node_pos = _separate_nodes_on_screen(axes[0], prepared['structure_layout'],
+                                         node_size)
     node_pos = display_PDB_direct_interaction_network(
         axes[0], prepared['chain_to_uniprot'], prepared['interacting_uniprot_ids'],
         prepared['chain_types'], prepared['node_color_palette'], node_size, edge_width,
-        node_font_size, labels=prepared['labels'], node_pos=prepared['structure_layout'])
+        node_font_size, labels=prepared['labels'], node_pos=node_pos)
     # a user's own file may be a prediction, not a PDB entry
     source = 'Model' if is_local_structure_file(PDB_ID) else 'PDB'
     axes[0].set_title(f'{source} Direct Interaction Network')
