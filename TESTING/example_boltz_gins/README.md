@@ -5,9 +5,12 @@ A small predicted structure for trying `bioplexpy-structure` and the functions i
 
 - **Complex:** human GINS tetramer, full-length UniProt sequences: GINS1 (Q14691, chain A),
   GINS2 (Q9Y248, B), GINS3 (Q9BRX5, C), GINS4 (Q9BRT9, D); 820 residues.
-- **Predictor:** [Boltz](https://github.com/jwohlwend/boltz), run 2026-10-02 from
+- **Predictor:** [Boltz](https://github.com/jwohlwend/boltz) 2.2.1, run 2026-10-02 from
   `gins_2E9X_boltz.yaml` (3 recycling steps, 200 sampling steps). Boltz's code and weights are
   released under the MIT license.
+- **MSAs:** precomputed alignments for the four proteins, downloaded from the AlphaFold Protein
+  Structure Database, were supplied to the run; the Boltz MSA server was not used. The MSAs are not
+  included here.
 - **What is here:** model 0 of that run, in the folder layout Boltz writes, so the folder can be
   given to BioPlexPy as it is:
   - `predictions/gins_2E9X/gins_2E9X_model_0.cif`: the model;
