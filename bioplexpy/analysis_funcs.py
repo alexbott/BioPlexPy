@@ -1086,8 +1086,9 @@ def _bioplex3d_interface(model, chain_i_id, chain_j_id, pae_data=None, ca_dist=8
     Returns a boolean array, [residue of chain i][residue of chain j].
     '''
     def ca_coords(chain):
-        return np.array([residue['CA'].coord if 'CA' in residue else [np.nan] * 3
-                         for residue in chain], dtype=float)
+        # polymer residues only: a calcium ion's atom is also named CA
+        return np.array([residue['CA'].coord if residue.id[0] == ' ' and 'CA' in residue
+                         else [np.nan] * 3 for residue in chain], dtype=float)
 
     contact = cdist(ca_coords(model[chain_i_id]), ca_coords(model[chain_j_id])) < ca_dist
     if pae_data is not None:
