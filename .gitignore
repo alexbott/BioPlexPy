@@ -157,3 +157,6 @@ cython_debug/
 *.pdb
 *.cif
 renders/
+
+# ...except the small example prediction shipped with the notebooks
+!TESTING/example_boltz_gins/**/*.cif
