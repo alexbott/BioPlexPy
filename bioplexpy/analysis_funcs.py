@@ -1747,7 +1747,8 @@ def read_interface_confidence(structure_file, chain_ids=None):
         {'tool': 'af3'|'boltz'|'colabfold', 'source': path,
          'scores': {score_name: {(chain_i, chain_j): value}}}, with both
         orders of every pair present (equal for symmetric scores) and no
-        same-chain entries.
+        same-chain entries. A pair the predictor gives no value for (e.g.
+        two ions in an AlphaFold3 model) has no entry.
 
     Examples
     --------
@@ -1769,8 +1770,11 @@ def read_interface_confidence(structure_file, chain_ids=None):
         if len(matrix) != len(order):
             raise ValueError(f'{source}: {len(matrix)} chains in the confidence '
                              f'matrix but {len(order)} expected')
+        # a predictor can leave a pair without a value (AlphaFold3 writes
+        # null between two single-atom chains such as ions): no entry then
         return {(order[i], order[j]): float(matrix[i][j])
-                for i in range(len(order)) for j in range(len(order)) if i != j}
+                for i in range(len(order)) for j in range(len(order))
+                if i != j and matrix[i][j] is not None}
 
     def check_order(order, what):
         if list(order) != chain_ids:

@@ -162,6 +162,29 @@ def test_mismatched_confidence_file_only_drops_scores():
                                    'structure_contact', 'bioplex_293T', 'bioplex_HCT116']
 
 
+def test_af3_null_pair_scores_are_left_out():
+    '''
+    AlphaFold3 writes null pair ipTM between two single-atom chains (ions);
+    those pairs get no entry and the other scores are still read.
+    '''
+    import shutil
+    folder = os.path.join(ARP23, 'af3')
+    _need(folder)
+    model = sorted(glob.glob(os.path.join(folder, '*_model_0.cif')))[0]
+    summary = model.replace('_model_0.cif', '_summary_confidences_0.json')
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(model, tmp)
+        with open(summary) as fh:
+            data = json.load(fh)
+        data['chain_pair_iptm'][5][6] = data['chain_pair_iptm'][6][5] = None
+        with open(os.path.join(tmp, os.path.basename(summary)), 'w') as fh:
+            json.dump(data, fh)
+        scores = read_interface_confidence(
+            os.path.join(tmp, os.path.basename(model)))['scores']['pair_iptm']
+    assert ('F', 'G') not in scores and ('G', 'F') not in scores
+    assert len(scores) == 7 * 6 - 2 and ('A', 'B') in scores
+
+
 def test_homo_oligomer_keeps_highest():
     confidence = dict(tool='af3', source='x', scores={'pair_iptm': {
         ('A', 'C'): 0.2, ('C', 'A'): 0.2, ('B', 'C'): 0.8, ('C', 'B'): 0.8,
