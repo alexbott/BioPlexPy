@@ -440,7 +440,7 @@ def build_parser():
                                 'False in the tables (structure_contact is unchanged). A '
                                 'contact with no score is kept. There is no default '
                                 'cutoff; on the one decoy tested, decoy contacts have '
-                                'ipsae_calc 0 and the lowest true contact 0.11')
+                                'ipsae_calc 0 and every other model contact 0.12 or more')
     filtering.add_argument('--filter-score', default=None, metavar='NAME',
                            help='score the filter tests (default ipsae_calc, which '
                                 'switches --compute-scores on); any score column works, '

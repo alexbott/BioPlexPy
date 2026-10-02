@@ -5,8 +5,8 @@ Checks for the opt-in confidence filter (filter_contacts_by_score(),
 ../fold_outputs/. Tests whose data isn't there are skipped.
 
 The cutoff used here, 0.05, is only an illustration: it sits inside the gap
-seen so far between decoy contacts (ipsae_calc 0) and the lowest true
-contact (0.11). It is not a recommended default.
+seen so far between decoy contacts (ipsae_calc 0) and the lowest value on
+any other model contact (0.12). It is not a recommended default.
 
 Run with pytest, or directly: python tests/test_filtering.py
 '''
@@ -135,7 +135,10 @@ def test_boltz_decoy_contacts_are_removed_and_real_ones_kept():
 
 
 def test_tfiih_contacts_all_survive():
-    '''Includes the lowest-scoring true contacts seen so far (0.11-0.16).'''
+    '''
+    Includes the lowest-scoring non-decoy contacts seen so far (0.12-0.16:
+    ERCC3-GTF2H1 and MNAT1-GTF2H2, which 6NMI itself does not have).
+    '''
     _need(TFIIH)
     files = sorted(glob.glob(os.path.join(TFIIH, '*_model_?.cif')))
     assert len(files) == 5
@@ -251,8 +254,9 @@ def test_bioplex3d_definition_without_pae_uses_distance_only():
     assert any('CA distance only' in str(w.message) for w in caught)
     any_atom = PDB_to_interacting_chains_uniprot_maps(pdb, None, 6,
                                                       chain_to_uniprot=chain_map)[1]
-    # CA-CA < 8 A is the stricter rule
-    assert pairs and {frozenset(p) for p in pairs} <= {frozenset(p) for p in any_atom}
+    # neither rule contains the other in general (6YW7 has CA pairs under
+    # 8 A with no atoms under 6 A); on 6NMI they give the same chain pairs
+    assert pairs and {frozenset(p) for p in pairs} == {frozenset(p) for p in any_atom}
 
 
 if __name__ == '__main__':

@@ -2413,8 +2413,9 @@ def filter_contacts_by_score(interacting_UniProt_IDs, chain_to_UniProt_mapping_d
 
     There is no default cutoff. On the one decoy tested so far (HSD17B14
     folded with the Arp2/3 complex, AlphaFold3 and Boltz) every decoy
-    contact has 'ipsae_calc' 0, and the lowest true contact seen is 0.11,
-    but that is too little to fix a number.
+    contact has 'ipsae_calc' 0, while every other contact in the models
+    tested has 0.12 or more (0.23 or more if the experimental structure
+    has it too). That is too little to fix a number.
 
     Parameters
     ----------

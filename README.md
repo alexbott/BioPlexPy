@@ -74,8 +74,10 @@ e.g. `pair_iptm`.
   without a PAE file and to contacts with a nucleic acid chain.
 * There is no default cutoff yet. In the one negative control run so far (HSD17B14 folded together
   with the Arp2/3 complex, AlphaFold3 and Boltz, five models each) every contact with the unrelated
-  protein has `ipsae_calc` 0, and the lowest value on a contact known from an experimental structure
-  is 0.11. One control is too little to fix a number.
+  protein has `ipsae_calc` 0. In the complexes tested, the lowest value on any other model contact
+  is 0.12, and the lowest on a contact that is also in the experimental structure is 0.23. One
+  control is too little to fix a number, and a low cutoff does not remove model contacts that the
+  experimental structure lacks (those score 0.12-0.62).
 * ipSAE differs by direction (A→B and B→A). The filter tests the larger of the two
   (`--filter-reduce max`); `mean` and `min` are available. This choice is provisional and still to be
   confirmed with the BioPlex3D authors.
