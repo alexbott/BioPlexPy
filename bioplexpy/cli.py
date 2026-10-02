@@ -317,12 +317,15 @@ def build_parser():
                     'with BioPlex AP-MS interactions in 293T and HCT116 cells.',
         epilog='Put the structure paths first: options that take a list '
                '(--uniprots, --chain-map) would otherwise read them as list items. '
-               'Example: bioplexpy-structure models/ --uniprots P61158 P61160 '
-               '--min-plddt 70')
+               'Examples: bioplexpy-structure models/ --uniprots P61158 P61160 '
+               '--min-plddt 70 | bioplexpy-structure fold_my_complex.zip --uniprots '
+               'P61158 P61160 (an AlphaFold Server download, used as it is)')
     parser.add_argument('structures', nargs='+',
                         help='.pdb/.ent/.cif/.mmcif files, directories of them, or '
-                             '.zip archives (e.g. an AlphaFold3 server download; only '
-                             'its structure files are extracted, temporarily). '
+                             '.zip archives. The .zip the AlphaFold Server downloads '
+                             'can be given directly, without unpacking (its models and '
+                             'confidence files are extracted to a temporary folder; '
+                             'the zip itself is not changed). '
                              'Raw predictor output folders can be given as-is: '
                              'AlphaFold3 server and ColabFold models are read from '
                              'the top of the folder (templates are ignored), Boltz '
