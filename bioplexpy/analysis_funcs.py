@@ -2314,6 +2314,40 @@ def _bioplex_symbol_lookup(*bp_PPI_dfs):
     return symbol_lookup
 
 
+_UNIPROT_ACCESSION = re.compile(
+    r'^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})(-\d+)?$')
+_uniprot_label_cache = {}
+
+
+def _uniprot_gene_label(uniprot_id):
+    '''
+    Internal helper: a display name for a UniProt accession that BioPlex
+    has no gene symbol for -- its gene name from UniProt, with the organism
+    added when it isn't human, e.g. 'Wasl (mouse)' for a mouse fragment in
+    a structure of a human complex. Returns the ID unchanged if it isn't a
+    UniProt accession (e.g. 'DNA:M', a free-text chain label) or the
+    lookup fails; results are remembered for the session.
+    '''
+    if uniprot_id in _uniprot_label_cache:
+        return _uniprot_label_cache[uniprot_id]
+    label = uniprot_id
+    if _UNIPROT_ACCESSION.match(str(uniprot_id)):
+        try:
+            response = requests.get('https://rest.uniprot.org/uniprotkb/'
+                                    f"{uniprot_id.split('-')[0]}.json", timeout=20)
+            response.raise_for_status()
+            entry = response.json()
+            label = entry['genes'][0]['geneName']['value']
+            organism = entry['organism']
+            if organism.get('taxonId') != 9606:
+                name = organism.get('commonName') or organism['scientificName']
+                label += f' ({name.lower() if "commonName" in organism else name})'
+        except (requests.RequestException, KeyError, IndexError, ValueError):
+            label = uniprot_id
+    _uniprot_label_cache[uniprot_id] = label
+    return label
+
+
 def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
                                           interacting_UniProt_IDs, chain_types,
                                           bp_293t_df, bp_hct116_df,
@@ -2377,8 +2411,8 @@ def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
             continue
         uniprot_A, uniprot_B = sorted(pair)
         rows.append(dict(UniprotA=uniprot_A, UniprotB=uniprot_B,
-                         SymbolA=symbols.get(uniprot_A, uniprot_A),
-                         SymbolB=symbols.get(uniprot_B, uniprot_B),
+                         SymbolA=symbols.get(uniprot_A) or _uniprot_gene_label(uniprot_A),
+                         SymbolB=symbols.get(uniprot_B) or _uniprot_gene_label(uniprot_B),
                          structure_contact=pair in contacts,
                          bioplex_293T=pair in edges_293t,
                          bioplex_HCT116=pair in edges_hct116))

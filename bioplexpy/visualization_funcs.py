@@ -603,7 +603,8 @@ def get_uniprot_color_palette(chain_to_UniProt_mapping_dict, chain_color_palette
     return uniprot_color
 
 
-def _relax_overlapping_nodes(pos, min_separation, iterations=200, step=0.5):
+def _relax_overlapping_nodes(pos, min_separation, iterations=200, step=0.5,
+                             edges=None, edge_clearance=None):
     '''
     Internal helper: nudge apart only the specific node pairs sitting
     closer together than min_separation, by directly displacing each
@@ -617,11 +618,20 @@ def _relax_overlapping_nodes(pos, min_separation, iterations=200, step=0.5):
     means its 3D centroid is near the structure's center of mass along
     those two axes). Here, nodes that aren't in collision are never
     touched at all.
+
+    With `edges` (pairs of node IDs) and `edge_clearance`, a node whose
+    center lies closer than edge_clearance to an edge between two *other*
+    nodes is likewise pushed straight off that edge, so a node never sits
+    on top of a line it has nothing to do with (which reads as two
+    connections that aren't there, and hides the real one).
     '''
     node_ids = list(pos.keys())
     n = len(node_ids)
     if n < 2:
         return pos
+    index = {node_id: i for i, node_id in enumerate(node_ids)}
+    edge_indices = [(index[a], index[b]) for a, b in (edges or [])
+                    if a in index and b in index and a != b]
 
     coords = np.array([pos[node_id] for node_id in node_ids], dtype=float)
     for _ in range(iterations):
@@ -638,14 +648,32 @@ def _relax_overlapping_nodes(pos, min_separation, iterations=200, step=0.5):
                     push = (min_separation - dist) / 2.0 * step * (delta / dist)
                     coords[i] += push
                     coords[j] -= push
+        if edge_clearance:
+            for i, j in edge_indices:
+                segment = coords[j] - coords[i]
+                length_sq = float(segment @ segment)
+                if length_sq < 1e-12:
+                    continue
+                for k in range(n):
+                    if k == i or k == j:
+                        continue
+                    t = np.clip((coords[k] - coords[i]) @ segment / length_sq, 0.0, 1.0)
+                    delta = coords[k] - (coords[i] + t * segment)
+                    dist = np.linalg.norm(delta)
+                    if dist < edge_clearance:
+                        moved = True
+                        if dist < 1e-9:  # exactly on the line: step off sideways
+                            delta = np.array([-segment[1], segment[0]])
+                            dist = np.linalg.norm(delta)
+                        coords[k] += (edge_clearance - dist) * step * (delta / dist)
         if not moved:
             break
 
     return {node_id: tuple(xy) for node_id, xy in zip(node_ids, coords)}
 
 
-def _separate_nodes_on_screen(ax, pos, node_size, gap_points=8, safety=1.15,
-                              rounds=3):
+def _separate_nodes_on_screen(ax, pos, node_size, gap_points=14, safety=1.15,
+                              rounds=3, edges=None):
     '''
     Internal helper: move apart nodes whose markers would overlap once
     drawn on `ax`. node_size is a marker *area in points^2*, fixed on
@@ -661,6 +689,11 @@ def _separate_nodes_on_screen(ax, pos, node_size, gap_points=8, safety=1.15,
     nodes can widen the data span. `safety` pads the separation because
     the axes can still shrink slightly when fig.tight_layout() runs after
     drawing.
+
+    gap_points also keeps an edge between two neighbouring nodes long
+    enough to see. With `edges` (pairs of node IDs), nodes are also moved
+    off any edge between two other nodes, leaving gap_points between the
+    marker and the line.
     '''
     if len(pos) < 2:
         return pos
@@ -668,6 +701,7 @@ def _separate_nodes_on_screen(ax, pos, node_size, gap_points=8, safety=1.15,
     width_pt = bbox.width * 72 / ax.figure.dpi
     height_pt = bbox.height * 72 / ax.figure.dpi
     min_sep_points = (2 * np.sqrt(node_size / np.pi) + gap_points) * safety
+    edge_clearance_points = (np.sqrt(node_size / np.pi) + gap_points) * safety
 
     node_ids = list(pos)
     coords = np.array([pos[n] for n in node_ids], dtype=float)
@@ -676,7 +710,9 @@ def _separate_nodes_on_screen(ax, pos, node_size, gap_points=8, safety=1.15,
         span[span == 0] = 1.0
         points_per_unit = np.array([width_pt, height_pt]) / span
         in_points = {n: tuple(xy * points_per_unit) for n, xy in zip(node_ids, coords)}
-        relaxed = _relax_overlapping_nodes(in_points, min_separation=min_sep_points)
+        relaxed = _relax_overlapping_nodes(in_points, min_separation=min_sep_points,
+                                           edges=edges,
+                                           edge_clearance=edge_clearance_points)
         new_coords = np.array([relaxed[n] for n in node_ids]) / points_per_unit
         if np.allclose(new_coords, coords):
             break
@@ -1492,6 +1528,7 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     '''
     from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
                                           _bioplex_symbol_lookup,
+                                          _uniprot_gene_label,
                                           get_chain_centroids,
                                           _read_interface_confidence_or_warn,
                                           is_local_structure_file)
@@ -1518,9 +1555,11 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     id_type = _id_type_map(chain_to_uniprot, chain_types)
     all_ids = sorted({id_i for ids in chain_to_uniprot.values() for id_i in ids})
 
-    # gene symbol labels where available, straight from the BioPlex dataframes
+    # gene symbol labels straight from the BioPlex dataframes; a protein
+    # BioPlex doesn't have (e.g. a non-human chain) is looked up in UniProt
     symbol_lookup = _bioplex_symbol_lookup(bp_293t_df, bp_hct116_df)
-    labels = {id_i: symbol_lookup.get(id_i, id_i) for id_i in all_ids}
+    labels = {id_i: symbol_lookup.get(id_i) or _uniprot_gene_label(id_i)
+              for id_i in all_ids}
 
     # a predicted model's own per-interface scores, if the predictor wrote
     # them next to the model file (or the caller's, e.g. with scores from
@@ -1569,8 +1608,10 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
     '''
     # all three panels share one layout and have the same size, so the
     # screen-space separation is worked out once, on the first panel
+    # (nodes are also kept off the direct-contact edges they aren't part of)
     node_pos = _separate_nodes_on_screen(axes[0], prepared['structure_layout'],
-                                         node_size)
+                                         node_size,
+                                         edges=prepared['interacting_uniprot_ids'])
     node_pos = display_PDB_direct_interaction_network(
         axes[0], prepared['chain_to_uniprot'], prepared['interacting_uniprot_ids'],
         prepared['chain_types'], prepared['node_color_palette'], node_size, edge_width,
