@@ -642,7 +642,7 @@ def is_local_structure_file(structure):
     return os.path.isfile(structure)
 
 
-def find_structure_files(path, extract_dir=None):
+def find_structure_files(path, extract_dir=None, include_pae=False):
     '''
     Find the model files in a structure predictor's output, as written by
     the tool -- a folder, or the .zip the AlphaFold3 server downloads --
@@ -678,6 +678,9 @@ def find_structure_files(path, extract_dir=None):
         Where to extract a .zip's structure files. Defaults to a new
         temporary directory (named in the returned notes), which is not
         deleted automatically.
+    include_pae: bool (optional)
+        Also extract each model's PAE file from a .zip (large; needed
+        only by compute_interface_scores()). Default False.
 
     Returns
     -------
@@ -702,7 +705,7 @@ def find_structure_files(path, extract_dir=None):
                       and os.path.isfile(os.path.join(directory, f)))
 
     if str(path).lower().endswith('.zip') and os.path.isfile(path):
-        return _find_structure_files_in_zip(path, extract_dir)
+        return _find_structure_files_in_zip(path, extract_dir, include_pae)
     if os.path.isfile(path):
         return [str(path)], [], []
     if not os.path.isdir(path):
@@ -764,7 +767,7 @@ def find_structure_files(path, extract_dir=None):
     return sorted(files), notes, groups
 
 
-def _find_structure_files_in_zip(zip_path, extract_dir=None):
+def _find_structure_files_in_zip(zip_path, extract_dir=None, include_pae=False):
     '''
     Internal helper for find_structure_files(): extract just the
     structure files from a .zip (skipping template hits and anything
@@ -781,11 +784,13 @@ def _find_structure_files_in_zip(zip_path, extract_dir=None):
     notes, n_extracted = [], 0
     with zipfile.ZipFile(zip_path) as archive:
         # structure files, plus the small per-model confidence files that
-        # read_interface_confidence() needs next to them (not full_data)
+        # read_interface_confidence() needs next to them (not full_data,
+        # unless include_pae: compute_interface_scores() needs the PAE)
         members = [m for m in archive.infolist()
                    if not m.is_dir()
                    and (m.filename.lower().endswith(exts)
-                        or _is_confidence_sidecar(m.filename))
+                        or _is_confidence_sidecar(m.filename)
+                        or (include_pae and _is_pae_sidecar(m.filename)))
                    and 'templates' not in m.filename.split('/')[:-1]]
         for member in members:
             target = os.path.realpath(os.path.join(root, member.filename))
@@ -1827,18 +1832,420 @@ def read_interface_confidence(structure_file, chain_ids=None):
     return dict(tool=tool, source=source, scores=scores)
 
 
-def _read_interface_confidence_or_warn(structure_file, chain_ids=None):
+# per-model files holding the predicted aligned error (PAE) matrix, which
+# compute_interface_scores() needs; much larger than the confidence files
+# above, so only extracted from a .zip when scores are to be computed
+_PAE_SIDECAR_PATTERNS = (
+    re.compile(r'_full_data_\d+\.json$'),             # AlphaFold3 server
+    re.compile(r'(^|/)pae_.+_model_\d+\.npz$'),       # Boltz
+    re.compile(r'(^|/)plddt_.+_model_\d+\.npz$'),     # Boltz per-residue pLDDT
+)
+
+
+def _is_pae_sidecar(path):
+    '''
+    Internal helper: True for the per-model PAE files read_pae() reads
+    (ColabFold keeps its PAE in the scores file, a confidence sidecar).
+    '''
+    return any(p.search(path.replace(os.sep, '/')) for p in _PAE_SIDECAR_PATTERNS)
+
+
+def find_pae_file(structure_file):
+    '''
+    Find the file holding the predicted aligned error (PAE) matrix that
+    belongs to one model file, by each tool's own naming convention
+    (files in the same folder):
+
+    - AlphaFold3 server: <job>_model_N.cif -> <job>_full_data_N.json
+    - Boltz: <input>_model_N.cif -> pae_<input>_model_N.npz
+    - ColabFold: <job>_unrelaxed_rank_00N_<model>.pdb ->
+      <job>_scores_rank_00N_<model>.json
+
+    Parameters
+    ----------
+    path to a model file: str
+
+    Returns
+    -------
+    str or None
+        Path of the PAE file, or None if there is none (e.g. an
+        experimental structure) or more than one candidate matches.
+    str or None
+        Which tool's format it is: 'af3', 'boltz' or 'colabfold'.
+
+    Examples
+    --------
+    >>> find_pae_file('pdb6nmi.ent')
+    (None, None)
+    '''
+    directory = os.path.dirname(os.path.abspath(structure_file))
+    base = os.path.basename(structure_file)
+    candidates = []
+    m = re.match(r'(.+)_model_(\d+)\.(cif|mmcif|pdb)$', base, re.IGNORECASE)
+    if m:
+        candidates.append((f'{m.group(1)}_full_data_{m.group(2)}.json', 'af3'))
+        candidates.append((f'pae_{m.group(1)}_model_{m.group(2)}.npz', 'boltz'))
+    m = re.match(r'(.+)_(?:un)?relaxed_(rank_\d+_.+)\.pdb$', base, re.IGNORECASE)
+    if m:
+        candidates.append((f'{m.group(1)}_scores_{m.group(2)}.json', 'colabfold'))
+    found = [(os.path.join(directory, name), tool) for name, tool in candidates
+             if os.path.isfile(os.path.join(directory, name))]
+    if len(found) != 1:
+        return None, None
+    return found[0]
+
+
+def _read_json_arrays(path, matrix_key, list_keys=()):
+    '''
+    Internal helper: read one square numeric matrix (and a few flat lists)
+    out of a large JSON file without building the whole file as Python
+    objects. A 3,600-residue AlphaFold3 full_data file costs ~1.2 GB
+    through json.load() and ~0.2 GB this way, in about half the time.
+    Falls back to json.load() if the file isn't laid out as expected.
+
+    Returns (float32 matrix, {key: list}).
+    '''
+    import json
+
+    with open(path, 'rb') as f:
+        text = f.read()
+    lists = {}
+    try:
+        for key in list_keys:
+            start = text.index(b'[', text.index(f'"{key}"'.encode()))
+            lists[key] = json.loads(text[start:text.index(b']', start) + 1])
+        start = text.index(b'[[', text.index(f'"{matrix_key}"'.encode()))
+        block = text[start:text.index(b']]', start) + 2]
+        del text
+        n = block.count(b'[') - 1
+        flat = np.fromstring(block.replace(b'[', b' ').replace(b']', b' ').decode(),
+                             dtype=np.float32, sep=',')
+        if flat.size != n * n:
+            raise ValueError('not a square matrix')
+        return flat.reshape(n, n), lists
+    except ValueError:
+        with open(path) as f:
+            data = json.load(f)
+        return (np.asarray(data[matrix_key], dtype=np.float32),
+                {key: data[key] for key in list_keys})
+
+
+def read_pae(structure_file, model=None):
+    '''
+    Read a predicted model's PAE matrix and per-residue pLDDT (see
+    find_pae_file()), and work out which PAE row belongs to each protein
+    residue of the model.
+
+    - AlphaFold3 server: rows are tokens, listed with their chain and
+      residue number in the file itself. Per-residue pLDDT is the CA
+      atom's value from the model file (AlphaFold3 reports pLDDT per atom).
+    - Boltz and ColabFold: rows follow the model's chains in file order,
+      residues numbered 1..L in each chain (the rule BioPlex3D uses).
+      Per-residue pLDDT comes from Boltz's plddt_*.npz (x 100) or the
+      ColabFold scores file.
+
+    Parameters
+    ----------
+    path to a model file: str
+    model: Bio.PDB Model (optional)
+        The already-parsed model, to avoid reading the file again.
+
+    Returns
+    -------
+    dict or None
+        None if the model has no PAE file. Otherwise {'tool', 'source',
+        'pae': float32 N x N array ([i][j] = error in j's position when
+        aligned on i), 'plddt': length-N array on a 0-100 scale,
+        'rows': {chain ID: PAE row of each residue, in model order}} with
+        an entry in 'rows' for every protein chain.
+
+    Raises
+    ------
+    ValueError
+        If the PAE doesn't fit the model: a different size, or protein
+        residues that aren't one row each (e.g. a modified residue that
+        AlphaFold3 splits into per-atom tokens).
+
+    Examples
+    --------
+    >>> read_pae('pdb6nmi.ent') is None
+    True
+    '''
+    source, tool = find_pae_file(structure_file)
+    if source is None:
+        return None
+    if model is None:
+        model = _load_pdb_model(structure_file, None)
+    proteins = [chain for chain in model if classify_chain(chain) == 'protein']
+
+    plddt = None
+    if tool == 'af3':
+        pae, lists = _read_json_arrays(source, 'pae', ('token_chain_ids', 'token_res_ids'))
+        token_rows = {}
+        for row, key in enumerate(zip(lists['token_chain_ids'], lists['token_res_ids'])):
+            token_rows.setdefault(key, []).append(row)
+        rows = {}
+        for chain in proteins:
+            tokens = [token_rows.get((chain.get_id(), residue.get_id()[1]), [])
+                      for residue in chain]
+            if any(len(t) != 1 for t in tokens):
+                raise ValueError(f'{source}: chain {chain.get_id()} of {structure_file} '
+                                 'does not have exactly one token per residue')
+            rows[chain.get_id()] = np.array([t[0] for t in tokens])
+        plddt = np.full(pae.shape[0], np.nan)
+        for chain in proteins:
+            plddt[rows[chain.get_id()]] = [residue['CA'].get_bfactor() if 'CA' in residue
+                                           else np.nan for residue in chain]
+    else:
+        if tool == 'boltz':
+            pae = np.load(source)['pae'].astype(np.float32, copy=False)
+            plddt_file = os.path.join(os.path.dirname(source),
+                                      'plddt_' + os.path.basename(source)[len('pae_'):])
+            if not os.path.isfile(plddt_file):
+                raise ValueError(f'{plddt_file} (per-residue pLDDT) is missing')
+            plddt = np.load(plddt_file)['plddt'].astype(float) * 100.0
+        else:
+            pae, lists = _read_json_arrays(source, 'pae', ('plddt',))
+            plddt = np.asarray(lists['plddt'], dtype=float)
+        # no token table: rows run over the chains in file order, each as
+        # long as its last residue number
+        rows, start = {}, 0
+        for chain in model:
+            numbers = np.array([residue.get_id()[1] for residue in chain])
+            if chain in proteins:
+                if numbers.min() < 1 or len(set(numbers)) != len(numbers):
+                    raise ValueError(f'chain {chain.get_id()} of {structure_file} is not '
+                                     'numbered 1..L, so its PAE rows cannot be found')
+                rows[chain.get_id()] = start + numbers - 1
+            start += numbers.max()
+        if start != pae.shape[0]:
+            raise ValueError(f'{source}: PAE has {pae.shape[0]} rows but the chains of '
+                             f'{structure_file} add up to {start} residues')
+    if pae.ndim != 2 or pae.shape[0] != pae.shape[1] or len(plddt) != pae.shape[0]:
+        raise ValueError(f'{source}: PAE {pae.shape} and pLDDT ({len(plddt)}) do not fit '
+                         'together')
+    return dict(tool=tool, source=source, pae=pae, plddt=plddt, rows=rows)
+
+
+def _sigmoid_score(x, L, x0, k, b):
+    '''Internal helper: the logistic fit used by pDockQ and pDockQ2.'''
+    return b + L / (1 + np.exp(-k * (x - x0)))
+
+
+def _ipsae(pae_ab, pae_cutoff):
+    '''
+    Internal helper: ipSAE for chain A -> chain B (Dunbrack 2025, the
+    per-residue "d0res" form, which is what ColabFold 1.6 writes).
+    pae_ab[i, j] is the PAE between residue i of A (aligned) and j of B.
+    '''
+    pae = pae_ab.astype(float)
+    valid = pae < pae_cutoff
+    n_valid = valid.sum(axis=1)
+    if not n_valid.any():
+        return 0.0
+    d0 = np.maximum(1.0, 1.24 * (np.maximum(27.0, n_valid) - 15) ** (1 / 3) - 1.8)
+    ptm = np.where(valid, 1 / (1 + (pae / d0[:, None]) ** 2), 0.0)
+    return float((ptm.sum(axis=1) / np.maximum(n_valid, 1)).max())
+
+
+# scores compute_interface_scores() adds, in table order
+COMPUTED_SCORES = ('pdockq_calc', 'pdockq2_calc', 'lis', 'clis', 'ilis', 'ipsae_calc',
+                   'lia', 'clia', 'clashes')
+
+
+def compute_interface_scores(structure_file, dist_cutoff=8, pae_cutoff=12,
+                             ipsae_pae_cutoff=15, model=None):
+    '''
+    Compute per-interface (chain-pair) scores for a predicted model from
+    the model file and its PAE matrix (see read_pae()), for every pair of
+    protein chains. Unlike read_interface_confidence(), which reports what
+    the predictor wrote, these are calculated here, the same way for every
+    tool.
+
+    The definitions, constants and cutoffs follow the BioPlex3D pipeline
+    (bioPlex3D_batch_interaction_scores.py, Ed Huttlin), which is the
+    reference for these scores:
+
+    - 'pdockq_calc': pDockQ (Bryant et al. 2022). Contacts are residue
+      pairs with CB atoms (CA for Gly) <= dist_cutoff; pLDDT is that atom's
+      B-factor, averaged over the interface residues of both chains.
+      Symmetric. A pair with no contacts gets the fit's floor (0.018), not 0.
+    - 'pdockq2_calc': pDockQ2 (Zhu et al. 2023, as implemented in
+      af_analysis). Contacts are CA atoms < dist_cutoff; for (A, B) the
+      pLDDT of A's interface residues and the PAE of A's residues against
+      B's are used, so (A, B) and (B, A) differ. Floor 0.007 with no
+      contacts. This is not the same definition as the 'pdockq2' that
+      ColabFold writes, hence the separate name.
+    - 'lis', 'lia': Local Interaction Score and Area (Kim et al.): mean of
+      1 - PAE / pae_cutoff over the residue pairs with PAE <= pae_cutoff,
+      and the number of such pairs. Directional.
+    - 'clis', 'clia': the same, restricted to pairs that are also in
+      contact (CB/CA-for-Gly <= dist_cutoff). Directional.
+    - 'ilis': sqrt(mean LIS x mean cLIS), each mean taken over the two
+      directions. Symmetric.
+    - 'clashes': number of atom pairs closer than 1.0 A. Symmetric.
+
+    One score is not in BioPlex3D:
+
+    - 'ipsae_calc': ipSAE (Dunbrack 2025), per-residue d0, PAE cutoff
+      ipsae_pae_cutoff. With the default of 15 this reproduces the 'ipsae'
+      values ColabFold 1.6 writes. Directional.
+
+    Two details differ from BioPlex3D on purpose: 'clis'/'clia' for the
+    reverse direction are the cLIS values (BioPlex3D stores the LIS values
+    in those columns), and a residue missing its CB/CA atom is skipped
+    rather than being an error.
+
+    Parameters
+    ----------
+    path to a model file: str
+    dist_cutoff: float (optional)
+        Contact distance in angstroms (default 8, as BioPlex3D).
+    pae_cutoff: float (optional)
+        PAE cutoff for LIS/cLIS (default 12).
+    ipsae_pae_cutoff: float (optional)
+        PAE cutoff for ipSAE (default 15).
+    model: Bio.PDB Model (optional)
+        The already-parsed model, to avoid reading the file again.
+
+    Returns
+    -------
+    dict or None
+        None if the model has no PAE file (e.g. an experimental structure:
+        its B-factors are not pLDDT, so nothing is computed). Otherwise
+        {'tool', 'source', 'scores': {score_name: {(chain_i, chain_j):
+        value}}} in the same form as read_interface_confidence(): both
+        orders of every protein chain pair, where (chain_i, chain_j) holds
+        the chain_i -> chain_j value of a directional score.
+
+    Raises
+    ------
+    ValueError
+        If the PAE file doesn't fit the model (see read_pae()).
+
+    Examples
+    --------
+    >>> compute_interface_scores('pdb6nmi.ent') is None
+    True
+    '''
+    from scipy.spatial import cKDTree
+
+    if find_pae_file(structure_file)[0] is None:
+        return None
+    if model is None:
+        model = _load_pdb_model(structure_file, None)
+    pae_data = read_pae(structure_file, model=model)
+    pae, plddt, rows = pae_data['pae'], pae_data['plddt'], pae_data['rows']
+
+    # per chain: CB (CA for Gly) and CA coordinates, NaN where the atom is
+    # missing so that residue can never be in contact
+    chains = {}
+    for chain_id in rows:
+        chain = model[chain_id]
+        rep = np.full((len(chain), 3), np.nan)
+        ca = np.full((len(chain), 3), np.nan)
+        rep_plddt = np.full(len(chain), np.nan)
+        for i, residue in enumerate(chain):
+            name = 'CA' if residue.get_resname() == 'GLY' else 'CB'
+            if name in residue:
+                rep[i] = residue[name].coord
+                rep_plddt[i] = residue[name].get_bfactor()
+            if 'CA' in residue:
+                ca[i] = residue['CA'].coord
+        atoms = np.array([atom.coord for residue in chain for atom in residue], dtype=float)
+        chains[chain_id] = dict(rep=rep, ca=ca, rep_plddt=rep_plddt, atoms=atoms)
+    # some predictors write pLDDT on a 0-1 scale (see _plddt_scale_factor())
+    all_b = np.concatenate([c['rep_plddt'] for c in chains.values()])
+    if np.nanmax(all_b) <= 1.0:
+        for c in chains.values():
+            c['rep_plddt'] = c['rep_plddt'] * 100.0
+
+    def mean(values):
+        return float(values.mean()) if values.size else 0.0
+
+    def pdockq2(contact, plddt_a, pae_ab):
+        x = mean(plddt_a[contact.any(axis=1)]) * mean(
+            1 / (1 + (pae_ab[contact].astype(float) / 10) ** 2))
+        return float(_sigmoid_score(x, 1.31034849, 84.7326239, 0.0747157696, 0.00501886443))
+
+    def lis(pae_ab, close=None):
+        keep = pae_ab <= pae_cutoff
+        if close is not None:
+            keep = keep & close
+        return int(keep.sum()), mean(1 - pae_ab[keep].astype(float) / pae_cutoff)
+
+    scores = {name: {} for name in COMPUTED_SCORES}
+    chain_ids = list(chains)
+    for n, id_a in enumerate(chain_ids):
+        a, rows_a = chains[id_a], rows[id_a]
+        for id_b in chain_ids[n + 1:]:
+            b, rows_b = chains[id_b], rows[id_b]
+            ab, ba = (id_a, id_b), (id_b, id_a)
+            close = cdist(a['rep'], b['rep']) <= dist_cutoff
+            contact_ca = cdist(a['ca'], b['ca']) < dist_cutoff
+            pae_ab = pae[np.ix_(rows_a, rows_b)]
+            pae_ba = pae[np.ix_(rows_b, rows_a)]
+
+            n_contacts = int(close.sum())
+            interface_plddt = np.concatenate([a['rep_plddt'][close.any(axis=1)],
+                                              b['rep_plddt'][close.any(axis=0)]])
+            x = mean(interface_plddt) * np.log10(n_contacts) if n_contacts else 0.0
+            scores['pdockq_calc'][ab] = scores['pdockq_calc'][ba] = float(
+                _sigmoid_score(x, 0.724, 152.611, 0.052, 0.018))
+            scores['pdockq2_calc'][ab] = pdockq2(contact_ca, plddt[rows_a], pae_ab)
+            scores['pdockq2_calc'][ba] = pdockq2(contact_ca.T, plddt[rows_b], pae_ba)
+
+            (scores['lia'][ab], scores['lis'][ab]) = lis(pae_ab)
+            (scores['lia'][ba], scores['lis'][ba]) = lis(pae_ba)
+            (scores['clia'][ab], scores['clis'][ab]) = lis(pae_ab, close)
+            (scores['clia'][ba], scores['clis'][ba]) = lis(pae_ba, close.T)
+            mean_lis = (scores['lis'][ab] + scores['lis'][ba]) / 2
+            mean_clis = (scores['clis'][ab] + scores['clis'][ba]) / 2
+            scores['ilis'][ab] = scores['ilis'][ba] = (mean_lis * mean_clis) ** 0.5
+
+            scores['ipsae_calc'][ab] = _ipsae(pae_ab, ipsae_pae_cutoff)
+            scores['ipsae_calc'][ba] = _ipsae(pae_ba, ipsae_pae_cutoff)
+
+            near = cKDTree(a['atoms']).sparse_distance_matrix(
+                cKDTree(b['atoms']), 1.0, output_type='coo_matrix')
+            scores['clashes'][ab] = scores['clashes'][ba] = int((near.data < 1.0).sum())
+    return dict(tool=pae_data['tool'], source=pae_data['source'], scores=scores)
+
+
+def _read_interface_confidence_or_warn(structure_file, chain_ids=None,
+                                       compute_scores=False, model=None):
     '''
     Internal helper: read_interface_confidence(), but a confidence file
     that doesn't fit its model (e.g. a different chain list) only costs the
     scores -- a warning is issued and None returned -- so the contact
     analysis and figure still go ahead. Used by the CLI and the renderers.
+
+    With compute_scores, the scores from compute_interface_scores() are
+    added alongside the predictor's own (under their own names, so neither
+    replaces the other); a PAE file that is missing or doesn't fit likewise
+    only costs those scores.
     '''
     try:
-        return read_interface_confidence(structure_file, chain_ids=chain_ids)
+        confidence = read_interface_confidence(structure_file, chain_ids=chain_ids)
     except (ValueError, KeyError) as e:
         warnings.warn(f'Interface confidence for {structure_file} skipped: {e}')
-        return None
+        confidence = None
+    if not compute_scores:
+        return confidence
+    try:
+        computed = compute_interface_scores(structure_file, model=model)
+    except (ValueError, KeyError) as e:
+        warnings.warn(f'Interface scores for {structure_file} not computed: {e}')
+        return confidence
+    if computed is None:
+        warnings.warn(f'Interface scores for {structure_file} not computed: no PAE '
+                      'file next to the model (see find_pae_file()).')
+        return confidence
+    if confidence is None:
+        return computed
+    confidence['scores'].update(computed['scores'])
+    confidence['pae_source'] = computed['source']
+    return confidence
 
 
 def interface_confidence_by_uniprot(interface_confidence, chain_to_UniProt_mapping_dict):

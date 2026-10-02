@@ -1003,7 +1003,11 @@ def _style_nucleic_acid_nodes(nodes, G, id_type, node_color_map,
 # score on each edge; all continuous on a fixed 0-1 scale, no cutoff
 CONFIDENCE_STYLES = ('width', 'alpha', 'color')
 _SCORE_NAMES = {'pair_iptm': 'chain-pair ipTM', 'ipsae': 'ipSAE',
-                'pdockq': 'pDockQ', 'pdockq2': 'pDockQ2'}
+                'pdockq': 'pDockQ', 'pdockq2': 'pDockQ2',
+                # computed by compute_interface_scores()
+                'pdockq_calc': 'pDockQ (computed)', 'pdockq2_calc': 'pDockQ2 (computed)',
+                'lis': 'LIS (computed)', 'clis': 'cLIS (computed)',
+                'ilis': 'iLIS (computed)', 'ipsae_calc': 'ipSAE (computed)'}
 _TOOL_NAMES = {'af3': 'AlphaFold3', 'boltz': 'Boltz', 'colabfold': 'ColabFold'}
 _REDUCERS = {'mean': np.mean, 'min': min, 'max': max}
 
@@ -1478,7 +1482,7 @@ def display_All_BioPlex_interactions_two_cell_lines(ax, protein_ids,
 def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
                             interact_dist_threshold, chain_to_uniprot=None,
                             min_plddt=None, confidence_score='pair_iptm',
-                            confidence_reduce='mean'):
+                            confidence_reduce='mean', interface_confidence=None):
     '''
     Internal helper: everything render_figure2_panels() and
     render_figure2_panels_static() both need -- the PDB-direct/UniProt
@@ -1519,11 +1523,13 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     labels = {id_i: symbol_lookup.get(id_i, id_i) for id_i in all_ids}
 
     # a predicted model's own per-interface scores, if the predictor wrote
-    # them next to the model file
+    # them next to the model file (or the caller's, e.g. with scores from
+    # compute_interface_scores() added)
     edge_scores, confidence_label = None, None
     if is_local_structure_file(PDB_ID):
-        interface_confidence = _read_interface_confidence_or_warn(
-            PDB_ID, chain_ids=list(chain_types))
+        if interface_confidence is None:
+            interface_confidence = _read_interface_confidence_or_warn(
+                PDB_ID, chain_ids=list(chain_types))
         edge_scores, confidence_label = get_edge_confidence_scores(
             interface_confidence, chain_to_uniprot, score=confidence_score,
             reduce=confidence_reduce)
@@ -1599,7 +1605,8 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
 def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
     interact_dist_threshold=6, figsize=(16, 5.5), node_size=1400,
     edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt=None,
-    confidence_style='alpha', confidence_score='pair_iptm', confidence_reduce='mean'):
+    confidence_style='alpha', confidence_score='pair_iptm', confidence_reduce='mean',
+    interface_confidence=None):
     '''
     Reproduce Figure 2F-H of Huttlin et al. 2021 for a given PDB structure:
     finds direct interactions from the structure, overlays BioPlex AP-MS
@@ -1645,6 +1652,10 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
         How the two directions of an asymmetric score (Boltz ipTM, ipSAE,
         pDockQ2) become one edge value: 'mean' (default), 'min' or 'max'.
         The legend says which, when it matters.
+    interface_confidence: dict (optional)
+        Scores to show instead of reading the predictor's confidence file,
+        in read_interface_confidence() form -- e.g. with the scores from
+        compute_interface_scores() merged in.
 
     Returns
     -------
@@ -1658,7 +1669,8 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
                                        chain_to_uniprot=chain_to_uniprot,
                                        min_plddt=min_plddt,
                                        confidence_score=confidence_score,
-                                       confidence_reduce=confidence_reduce)
+                                       confidence_reduce=confidence_reduce,
+                                       interface_confidence=interface_confidence)
     structure_view = render_pdb_structure_py3Dmol(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         rotation=prepared['structure_rotation'], center=prepared['structure_center'])
@@ -1887,7 +1899,8 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     interact_dist_threshold=6, figsize=(20, 5.5), node_size=1400, edge_width=2.5,
     node_font_size=9, structure_width=800, structure_height=800,
     chain_to_uniprot=None, min_plddt=None, confidence_style='alpha',
-    confidence_score='pair_iptm', confidence_reduce='mean'):
+    confidence_score='pair_iptm', confidence_reduce='mean',
+    interface_confidence=None):
     '''
     Like render_figure2_panels(), but produces a single static, 4-panel
     matplotlib Figure -- the PDB structure (via PyMOL,
@@ -1931,6 +1944,10 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
         How the two directions of an asymmetric score (Boltz ipTM, ipSAE,
         pDockQ2) become one edge value: 'mean' (default), 'min' or 'max'.
         The legend says which, when it matters.
+    interface_confidence: dict (optional)
+        Scores to show instead of reading the predictor's confidence file,
+        in read_interface_confidence() form -- e.g. with the scores from
+        compute_interface_scores() merged in.
 
     Returns
     -------
@@ -1942,7 +1959,8 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
                                        chain_to_uniprot=chain_to_uniprot,
                                        min_plddt=min_plddt,
                                        confidence_score=confidence_score,
-                                       confidence_reduce=confidence_reduce)
+                                       confidence_reduce=confidence_reduce,
+                                       interface_confidence=interface_confidence)
     structure_image = render_pdb_structure_static(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         width=structure_width, height=structure_height,

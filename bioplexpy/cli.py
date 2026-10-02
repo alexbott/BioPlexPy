@@ -35,7 +35,7 @@ import pandas as pd
 
 
 
-def _collect_structure_files(paths, zip_extract_root):
+def _collect_structure_files(paths, zip_extract_root, include_pae=False):
     '''
     Expand each path into its model files with find_structure_files()
     (which recognizes AF3-server, ColabFold and Boltz output layouts),
@@ -47,7 +47,8 @@ def _collect_structure_files(paths, zip_extract_root):
     for i, path in enumerate(paths):
         # each .zip gets its own folder under this run's temporary directory
         extract_dir = os.path.join(zip_extract_root, f'zip{i}')
-        found, notes, groups = find_structure_files(path, extract_dir=extract_dir)
+        found, notes, groups = find_structure_files(path, extract_dir=extract_dir,
+                                                    include_pae=include_pae)
         for f in found:
             # files extracted from a .zip are shown as <zip>:<member>, since
             # the temporary copy is gone once the run ends
@@ -165,8 +166,9 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
         structure_file, None, args.distance, chain_to_uniprot=file_chain_map,
         min_plddt=args.min_plddt)
     # the predictor's own chain-pair scores, if it wrote any next to the model
+    # (with --compute-scores, plus scores calculated here from the PAE)
     interface_confidence = _read_interface_confidence_or_warn(
-        structure_file, chain_ids=list(maps[2]))
+        structure_file, chain_ids=list(maps[2]), compute_scores=args.compute_scores)
     contacts_df = compare_structure_contacts_to_BioPlex(
         *maps, bp_293t_df, bp_hct116_df, interface_confidence=interface_confidence)
     contacts_df.to_csv(os.path.join(args.out_dir, f'{name}_contacts.tsv'),
@@ -185,7 +187,8 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                                  chain_to_uniprot=file_chain_map,
                                  min_plddt=args.min_plddt, confidence_style=style,
                                  confidence_score=args.confidence_score,
-                                 confidence_reduce=args.confidence_reduce)
+                                 confidence_reduce=args.confidence_reduce,
+                                 interface_confidence=interface_confidence)
             if args.interactive:
                 fig, view = render_figure2_panels(structure_file, None, bp_293t_df,
                                                   bp_hct116_df, **render_kwargs)
@@ -363,7 +366,16 @@ def build_parser():
     confidence.add_argument('--confidence-score', default='pair_iptm',
                             help='score to show: pair_iptm (AlphaFold3/Boltz; default), '
                                  'or ipsae/pdockq/pdockq2 if a ColabFold scores file '
-                                 'has them. All scores found go in the TSVs regardless')
+                                 'has them, or a computed one (see --compute-scores). '
+                                 'All scores found go in the TSVs regardless')
+    confidence.add_argument('--compute-scores', action='store_true',
+                            help='also calculate interface scores from each model and '
+                                 'its PAE file, as the BioPlex3D pipeline defines them: '
+                                 'pdockq_calc, pdockq2_calc, lis, clis, ilis, plus '
+                                 'ipsae_calc, lia/clia (pair counts) and clashes. '
+                                 'Protein chain pairs only; needs the PAE file next to '
+                                 'the model (AlphaFold3 full_data, Boltz pae_*.npz, '
+                                 'ColabFold scores JSON)')
     confidence.add_argument('--confidence-reduce', default='mean',
                             choices=['mean', 'min', 'max'],
                             help='for scores that differ by direction (Boltz ipTM, '
@@ -404,7 +416,7 @@ def main(argv=None):
 
 def _run(parser, args, chain_map, uniprots, zip_extract_root):
     structure_files, prediction_inputs, display = _collect_structure_files(
-        args.structures, zip_extract_root)
+        args.structures, zip_extract_root, include_pae=args.compute_scores)
     if not structure_files:
         parser.error('no structure files found')
     # one Boltz run over several input files holds several different
