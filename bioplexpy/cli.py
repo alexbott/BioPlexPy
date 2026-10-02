@@ -167,7 +167,7 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
 
     maps = PDB_to_interacting_chains_uniprot_maps(
         structure_file, None, args.distance, chain_to_uniprot=file_chain_map,
-        min_plddt=args.min_plddt, contact_definition=args.contact_definition)
+        min_plddt=args.min_plddt, contact_atoms=args.contact_atoms, max_pae=args.max_pae)
     # the predictor's own chain-pair scores, if it wrote any next to the model
     # (with --compute-scores, plus scores calculated here from the PAE)
     interface_confidence = _read_interface_confidence_or_warn(
@@ -200,7 +200,8 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                                  confidence_score=args.confidence_score,
                                  confidence_reduce=args.confidence_reduce,
                                  interface_confidence=interface_confidence,
-                                 contact_definition=args.contact_definition,
+                                 contact_atoms=args.contact_atoms,
+                                 max_pae=args.max_pae,
                                  filter_score=args.filter_score,
                                  min_score=args.min_score,
                                  filter_reduce=args.filter_reduce)
@@ -252,7 +253,8 @@ def reference_contacts(reference, args, chain_map, uniprots):
     with tempfile.TemporaryDirectory() as download_dir:
         chain_to_uniprot, interacting, chain_types = PDB_to_interacting_chains_uniprot_maps(
             reference, download_dir, args.distance, chain_to_uniprot=ref_chain_map,
-            contact_definition=args.contact_definition)
+            min_plddt=args.min_plddt, contact_atoms=args.contact_atoms,
+            max_pae=args.max_pae)
     protein_ids = {id_i for chain_id, ids in chain_to_uniprot.items()
                    if chain_types.get(chain_id) == 'protein' for id_i in ids}
     return {frozenset(pair) for pair in interacting if set(pair) <= protein_ids}
@@ -347,6 +349,19 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
             .reset_index(drop=True))
 
 
+# marks a contact option left to --contact-preset (see resolve_contact_settings())
+FROM_PRESET = 'preset'
+
+
+def _number_or_none(text):
+    '''argparse type: a number, or 'none'/'off' to switch a condition off.'''
+    if text == FROM_PRESET:     # argparse passes a string default through here
+        return text
+    if text.lower() in ('none', 'off'):
+        return None
+    return float(text)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog='bioplexpy-structure',
@@ -355,7 +370,7 @@ def build_parser():
         epilog='Put the structure paths first: options that take a list '
                '(--uniprots, --chain-map) would otherwise read them as list items. '
                'Examples: bioplexpy-structure models/ --uniprots P61158 P61160 '
-               '--min-plddt 70 | bioplexpy-structure fold_my_complex.zip --uniprots '
+               '--contact-preset bioplex2021 | bioplexpy-structure fold_my_complex.zip --uniprots '
                'P61158 P61160 (an AlphaFold Server download, used as it is)')
     parser.add_argument('structures', nargs='+',
                         help='.pdb/.ent/.cif/.mmcif files, directories of them, or '
@@ -385,21 +400,39 @@ def build_parser():
     mapping.add_argument('--min-coverage', type=float, default=0.5,
                          help='sequence matching: minimum chain coverage (default 0.5)')
 
+    contact = parser.add_argument_group(
+        'direct contacts (what counts as two chains touching)',
+        'By default the parameters of the BioPlex3D pipeline: CA atoms closer than '
+        '8 A, both residues with pLDDT >= 50, and PAE <= 10 in at least one '
+        'direction. The pLDDT and PAE conditions need the PAE file next to the '
+        'model; a structure without one (e.g. an experimental structure) is judged '
+        'on the distance alone. With CA atoms, contacts with a nucleic acid chain use '
+        'any atom closer than 6 A.')
+    contact.add_argument('--contact-preset', choices=['bioplex3d', 'bioplex2021'],
+                         default='bioplex3d',
+                         help='bioplex3d (default): the parameters above. bioplex2021: '
+                              'the rule of the BioPlex 3.0 paper (Huttlin et al. 2021) '
+                              'that BioPlexPy used before -- any two atoms closer than '
+                              '6 A, no pLDDT or PAE condition. The options below replace '
+                              'single parameters of the preset')
+    contact.add_argument('--contact-atoms', choices=['ca', 'any'], default=None,
+                         help='atoms compared: ca (one CA per residue) or any (every atom)')
+    contact.add_argument('--distance', type=float, default=None,
+                         help='distance cutoff in Angstroms (preset: 8, or 6 for '
+                              'bioplex2021)')
+    contact.add_argument('--min-plddt', type=_number_or_none, default=FROM_PRESET,
+                         metavar='VALUE',
+                         help="minimum pLDDT, 0-100 (preset: 50, or none for bioplex2021); "
+                              "'none' switches it off. With --contact-atoms ca both "
+                              'residues of a pair must reach it; with any, atoms below it '
+                              'are ignored')
+    contact.add_argument('--max-pae', type=_number_or_none, default=FROM_PRESET,
+                         metavar='VALUE',
+                         help="maximum PAE in at least one direction (preset: 10, or none "
+                              "for bioplex2021); 'none' switches it off. Only used with "
+                              '--contact-atoms ca')
+
     analysis = parser.add_argument_group('analysis')
-    analysis.add_argument('--min-plddt', type=float, default=None,
-                          help='predicted structures only: ignore atoms below this '
-                               'pLDDT (0-100) when finding contacts, e.g. 70')
-    analysis.add_argument('--distance', type=float, default=6,
-                          help='direct-contact distance cutoff in Angstroms (default 6)')
-    analysis.add_argument('--contact-definition', choices=['any-atom', 'bioplex3d'],
-                          default='any-atom',
-                          help='what counts as a direct contact. any-atom (default): any '
-                               'two atoms closer than --distance. bioplex3d: the BioPlex3D '
-                               "pipeline's interface definition for protein pairs -- CA "
-                               'atoms closer than 8 A, both residues pLDDT >= 50, PAE <= '
-                               '10 in at least one direction (needs the PAE file next to '
-                               'the model; without one, the CA distance only); --distance '
-                               'and --min-plddt then only apply to nucleic acid contacts')
     analysis.add_argument('--bioplex-293t-version', default='3.0')
     analysis.add_argument('--bioplex-hct116-version', default='1.0')
 
@@ -468,7 +501,7 @@ def build_parser():
 
 def _resolve_filter_args(parser, args):
     '''Fill in the filter defaults, and switch on what the options need.'''
-    from bioplexpy.analysis_funcs import COMPUTED_SCORES
+    from bioplexpy.analysis_funcs import COMPUTED_SCORES, resolve_contact_settings
 
     if args.min_score is None and (args.filter_score or args.filter_reduce):
         parser.error('--filter-score/--filter-reduce only apply with --min-score')
@@ -476,7 +509,18 @@ def _resolve_filter_args(parser, args):
     args.filter_reduce = args.filter_reduce or 'max'
     if args.min_score is not None and args.filter_score in COMPUTED_SCORES:
         args.compute_scores = True
-    args.contact_definition = args.contact_definition.replace('-', '_')
+    # contact parameters: the preset's, unless given
+    max_pae_given = args.max_pae != FROM_PRESET
+    contact = resolve_contact_settings(
+        args.contact_preset, contact_atoms=args.contact_atoms or FROM_PRESET,
+        distance=FROM_PRESET if args.distance is None else args.distance,
+        min_plddt=args.min_plddt, max_pae=args.max_pae)
+    args.contact_atoms, args.distance = contact['contact_atoms'], contact['distance']
+    args.min_plddt, args.max_pae = contact['min_plddt'], contact['max_pae']
+    if args.contact_atoms == 'any' and args.max_pae is not None:
+        if max_pae_given:
+            parser.error('--max-pae needs --contact-atoms ca')
+        args.max_pae = None     # a preset's PAE condition only goes with CA atoms
 
 
 def main(argv=None):
@@ -498,7 +542,8 @@ def main(argv=None):
 def _run(parser, args, chain_map, uniprots, zip_extract_root):
     structure_files, prediction_inputs, display = _collect_structure_files(
         args.structures, zip_extract_root, include_pae=(args.compute_scores
-                     or args.contact_definition == 'bioplex3d'))
+                     or (args.contact_atoms == 'ca'
+                         and (args.min_plddt is not None or args.max_pae is not None))))
     if not structure_files:
         parser.error('no structure files found')
     # one Boltz run over several input files holds several different

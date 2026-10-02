@@ -1067,21 +1067,76 @@ def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, d
     return _direct_interaction_chain_pairs(model, dist_threshold)
 
 
-# how a direct contact between two chains is defined (see
-# PDB_to_interacting_chains_uniprot_maps())
-CONTACT_DEFINITIONS = ('any_atom', 'bioplex3d')
+# What counts as a direct contact between two chains: which atoms are
+# compared ('ca' = CA atoms, one per residue; 'any' = every polymer atom),
+# the distance cutoff in angstroms, and -- for predicted models -- a minimum
+# pLDDT and a maximum PAE. Used as the defaults of the render functions and
+# the command line (see resolve_contact_settings()).
+#   'bioplex3d':   the interface definition of the BioPlex3D pipeline
+#                  (getInterfaceResiduesScores() in bioPlex3D_batchInterfaceMapper.py)
+#   'bioplex2021': the BioPlex 3.0 paper (Huttlin et al. 2021, Figure 2), which
+#                  BioPlexPy used until now
+CONTACT_PRESETS = {
+    'bioplex3d': dict(contact_atoms='ca', distance=8, min_plddt=50, max_pae=10),
+    'bioplex2021': dict(contact_atoms='any', distance=6, min_plddt=None, max_pae=None),
+}
+# contacts with a nucleic acid chain are always found with every atom, at
+# this distance: BioPlex3D has no definition for them
+NUCLEIC_ACID_CONTACT_DISTANCE = 6
+# marks a contact parameter that is left to the preset
+FROM_PRESET = 'preset'
 
 
-def _bioplex3d_interface(model, chain_i_id, chain_j_id, pae_data=None, ca_dist=8,
-                         interface_min_plddt=50, interface_max_pae=10):
+def resolve_contact_settings(contact_preset='bioplex3d', contact_atoms=FROM_PRESET,
+                             distance=FROM_PRESET, min_plddt=FROM_PRESET,
+                             max_pae=FROM_PRESET):
     '''
-    Internal helper: the residue pairs BioPlex3D counts as the interface of
-    two protein chains (getInterfaceResiduesScores() in
-    bioPlex3D_batchInterfaceMapper.py): CA atoms closer than ca_dist, both
-    residues with pLDDT >= interface_min_plddt, and PAE <=
-    interface_max_pae in at least one direction. The pLDDT and PAE
-    conditions need pae_data (from read_pae()); without it only the
-    distance is used.
+    The contact parameters to use: those of a preset (CONTACT_PRESETS), with
+    any parameter given here replacing the preset's value.
+
+    Parameters
+    ----------
+    contact_preset: str (optional)
+        'bioplex3d' (default): CA atoms closer than 8 A, both residues with
+        pLDDT >= 50, PAE <= 10 in at least one direction.
+        'bioplex2021': any two atoms closer than 6 A, no pLDDT or PAE
+        condition -- the BioPlex 3.0 paper (Huttlin et al. 2021).
+    contact_atoms: 'ca' or 'any' (optional)
+    distance: float (optional)
+    min_plddt: float or None (optional)
+        None switches the pLDDT condition off.
+    max_pae: float or None (optional)
+        None switches the PAE condition off. Only used with contact_atoms='ca'.
+
+    Returns
+    -------
+    dict
+        {'contact_atoms', 'distance', 'min_plddt', 'max_pae'}
+    '''
+    if contact_preset not in CONTACT_PRESETS:
+        raise ValueError(f'contact_preset must be one of {list(CONTACT_PRESETS)}, '
+                         f"got '{contact_preset}'")
+    settings = dict(CONTACT_PRESETS[contact_preset])
+    given = dict(contact_atoms=contact_atoms, distance=distance, min_plddt=min_plddt,
+                 max_pae=max_pae)
+    settings.update({name: value for name, value in given.items()
+                     if not (isinstance(value, str) and value == FROM_PRESET)})
+    if settings['contact_atoms'] not in ('ca', 'any'):
+        raise ValueError(f"contact_atoms must be 'ca' or 'any', got "
+                         f"'{settings['contact_atoms']}'")
+    return settings
+
+
+def _ca_interface(model, chain_i_id, chain_j_id, pae_data=None, distance=8,
+                  min_plddt=50, max_pae=10):
+    '''
+    Internal helper: the residue pairs that make up the interface of two
+    protein chains the way BioPlex3D finds them (getInterfaceResiduesScores()
+    in bioPlex3D_batchInterfaceMapper.py): CA atoms closer than `distance`,
+    both residues with pLDDT >= min_plddt, and PAE <= max_pae in at least
+    one direction. The pLDDT and PAE conditions need pae_data (from
+    read_pae()); without it, or with the condition set to None, they are
+    not applied.
 
     Returns a boolean array, [residue of chain i][residue of chain j].
     '''
@@ -1090,44 +1145,47 @@ def _bioplex3d_interface(model, chain_i_id, chain_j_id, pae_data=None, ca_dist=8
         return np.array([residue['CA'].coord if residue.id[0] == ' ' and 'CA' in residue
                          else [np.nan] * 3 for residue in chain], dtype=float)
 
-    contact = cdist(ca_coords(model[chain_i_id]), ca_coords(model[chain_j_id])) < ca_dist
+    contact = cdist(ca_coords(model[chain_i_id]), ca_coords(model[chain_j_id])) < distance
     if pae_data is not None:
         rows_i, rows_j = pae_data['rows'][chain_i_id], pae_data['rows'][chain_j_id]
-        plddt, pae = pae_data['plddt'], pae_data['pae']
-        confident = np.outer(plddt[rows_i] >= interface_min_plddt,
-                             plddt[rows_j] >= interface_min_plddt)
-        aligned = ((pae[np.ix_(rows_i, rows_j)] <= interface_max_pae)
-                   | (pae[np.ix_(rows_j, rows_i)].T <= interface_max_pae))
-        contact = contact & confident & aligned
+        if min_plddt is not None:
+            plddt = pae_data['plddt']
+            contact &= np.outer(plddt[rows_i] >= min_plddt, plddt[rows_j] >= min_plddt)
+        if max_pae is not None:
+            pae = pae_data['pae']
+            contact &= ((pae[np.ix_(rows_i, rows_j)] <= max_pae)
+                        | (pae[np.ix_(rows_j, rows_i)].T <= max_pae))
     return contact
 
 
 def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None,
-                                    contact_definition='any_atom', pae_data=None):
+                                    contact_atoms='any', max_pae=None, pae_data=None):
     '''
     Internal helper: compute directly-interacting chain pairs for an
     already-loaded Bio.PDB model. Factored out of
     get_interacting_chains_from_PDB() so PDB_to_interacting_chains_uniprot_maps()
     can reuse a single downloaded/parsed structure instead of re-fetching it.
 
-    If min_plddt is given (predicted structures only), atoms whose pLDDT
-    (read from the B-factor column, see _plddt_scale_factor()) is below
-    it are left out of the contact search, so low-confidence regions
-    (e.g. disordered loops placed arbitrarily by the predictor) can't
-    create spurious chain-chain contacts.
+    contact_atoms='any': two chains are in contact if any two of their
+    polymer atoms are closer than dist_threshold. If min_plddt is given
+    (predicted structures only), atoms whose pLDDT (read from the B-factor
+    column, see _plddt_scale_factor()) is below it are left out of the
+    search, so low-confidence regions can't create spurious contacts.
 
-    With contact_definition='bioplex3d', two protein chains are in contact
-    if _bioplex3d_interface() finds any residue pair (pae_data, from
-    read_pae(), adds its pLDDT and PAE conditions); dist_threshold and
-    min_plddt then only apply to pairs that involve a nucleic acid chain,
-    which keep the any-atom rule.
+    contact_atoms='ca': two protein chains are in contact if
+    _ca_interface() finds any residue pair -- CA atoms closer than
+    dist_threshold, and, when pae_data (from read_pae()) is given, both
+    residues with pLDDT >= min_plddt and PAE <= max_pae in at least one
+    direction. Pairs that involve a nucleic acid chain use every atom at
+    NUCLEIC_ACID_CONTACT_DISTANCE, with no pLDDT condition.
     '''
-    if contact_definition not in CONTACT_DEFINITIONS:
-        raise ValueError(f'contact_definition must be one of {list(CONTACT_DEFINITIONS)}, '
-                         f"got '{contact_definition}'")
-    plddt_scale = _plddt_scale_factor(model) if min_plddt is not None else None
-    chain_kind = ({chain.get_id(): classify_chain(chain) for chain in model}
-                  if contact_definition == 'bioplex3d' else {})
+    if contact_atoms not in ('ca', 'any'):
+        raise ValueError(f"contact_atoms must be 'ca' or 'any', got '{contact_atoms}'")
+    by_ca = contact_atoms == 'ca'
+    plddt_scale = (_plddt_scale_factor(model)
+                   if min_plddt is not None and not by_ca else None)
+    chain_kind = {chain.get_id(): classify_chain(chain) for chain in model} if by_ca else {}
+    atom_dist = NUCLEIC_ACID_CONTACT_DISTANCE if by_ca else dist_threshold
 
     def keep(atom):
         if atom.get_parent().id[0] != ' ':
@@ -1152,7 +1210,8 @@ def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None,
             pair_pae = (pae_data if pae_data is not None
                         and chain_i_id in pae_data['rows']
                         and chain_j_id in pae_data['rows'] else None)
-            if _bioplex3d_interface(model, chain_i_id, chain_j_id, pair_pae).any():
+            if _ca_interface(model, chain_i_id, chain_j_id, pair_pae, dist_threshold,
+                             min_plddt, max_pae).any():
                 chain_pairs_direct_interaction.append([chain_i_id, chain_j_id])
             continue
 
@@ -1177,8 +1236,8 @@ def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None,
         # compute pairwise distances betweeen all atoms from different chains
         dists = cdist(atom_coords_i, atom_coords_j)
 
-        # if a pair of atoms < dist_threshold angstroms apart, store as interacting chains
-        if np.sum(dists < dist_threshold) >= 1:
+        # if a pair of atoms < atom_dist angstroms apart, store as interacting chains
+        if np.sum(dists < atom_dist) >= 1:
             chain_pairs_direct_interaction.append([chain_i_id, chain_j_id])
 
     return chain_pairs_direct_interaction
@@ -1405,10 +1464,12 @@ def PDB_chains_to_uniprot(interacting_chains_list,
 
 def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
                                            protein_structure_dir,
-                                           interact_dist_threshold,
+                                           interact_dist_threshold=None,
                                            chain_to_uniprot=None,
                                            min_plddt=None,
-                                           contact_definition='any_atom'):
+                                           contact_atoms='any',
+                                           max_pae=None,
+                                           contact_preset=None):
     '''
     Get interacting chains from PDB structure mapped to UniProt IDs and
     PDB chain to UniProt mappings.
@@ -1443,23 +1504,36 @@ def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
         automatically by sequence). Isoform suffixes ('-2') are dropped,
         since BioPlex nodes are canonical accessions.
     min_plddt: float (optional)
-        For predicted structures: ignore atoms with pLDDT below this
-        (0-100 scale) when finding direct contacts. See
-        _plddt_scale_factor(); skipped with a warning if the B-factor
-        column doesn't hold pLDDT values.
-    contact_definition: str (optional)
-        What counts as a direct contact between two chains.
-        'any_atom' (default): any pair of polymer atoms closer than the
-        distance threshold.
-        'bioplex3d': the interface definition of the BioPlex3D pipeline,
-        for pairs of protein chains -- at least one residue pair with CA
-        atoms closer than 8 A, both residues with pLDDT >= 50 and PAE <= 10
-        in at least one direction. The pLDDT and PAE conditions need the
-        model's PAE file (see read_pae()); for a structure without one
-        (e.g. an experimental structure) only the CA distance is used.
-        The distance threshold and min_plddt are not used for protein
-        pairs. Pairs involving a nucleic acid chain, which BioPlex3D does
-        not cover, keep the 'any_atom' rule.
+        For predicted structures: a minimum pLDDT (0-100 scale).
+        With contact_atoms='any', atoms below it are ignored (pLDDT read
+        from the B-factor column, see _plddt_scale_factor(); skipped with a
+        warning if that column doesn't hold pLDDT values). With
+        contact_atoms='ca', both residues of a pair must reach it (pLDDT
+        read with the model's PAE file, see read_pae()).
+    contact_atoms: str (optional)
+        Which atoms are compared. 'any' (default): any pair of polymer
+        atoms closer than the distance threshold, as in the BioPlex 3.0
+        paper (with 6 A). 'ca': for pairs of protein chains, at least one
+        residue pair with CA atoms closer than the distance threshold, as
+        in the BioPlex3D pipeline (with 8 A, min_plddt 50 and max_pae 10).
+        Pairs involving a nucleic acid chain, which BioPlex3D does not
+        cover, are then found with any atom closer than 6 A.
+    max_pae: float (optional)
+        With contact_atoms='ca', for predicted structures: the residue
+        pair's PAE must be at most this in at least one direction.
+
+    contact_preset: str (optional)
+        'bioplex3d' or 'bioplex2021': take the distance threshold,
+        contact_atoms, min_plddt and max_pae from that preset (see
+        resolve_contact_settings()) instead of giving them here.
+
+    Given a distance threshold, this function keeps the paper's any-atom
+    rule unless told otherwise; the render functions and the command line
+    default to the 'bioplex3d' preset.
+
+    With contact_atoms='ca', min_plddt and max_pae need the model's PAE
+    file; for a structure without one (e.g. an experimental structure)
+    only the CA distance is used.
 
     Returns
     -------
@@ -1479,18 +1553,30 @@ def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
     # load the structure once and reuse it for both the direct-interaction
     # search and the chain classification (avoids downloading it twice)
     model = _load_pdb_model(PDB_ID, protein_structure_dir)
+    if contact_preset is not None:
+        if (interact_dist_threshold, min_plddt, contact_atoms, max_pae) != (
+                None, None, 'any', None):
+            raise ValueError('Give either contact_preset or the individual contact '
+                             'parameters, not both (see resolve_contact_settings() '
+                             'to change single parameters of a preset).')
+        settings = resolve_contact_settings(contact_preset)
+        interact_dist_threshold, min_plddt = settings['distance'], settings['min_plddt']
+        contact_atoms, max_pae = settings['contact_atoms'], settings['max_pae']
+    elif interact_dist_threshold is None:
+        raise ValueError('Give a distance threshold or a contact_preset.')
     pae_data = None
-    if contact_definition == 'bioplex3d' and is_local_structure_file(PDB_ID):
+    if (contact_atoms == 'ca' and (min_plddt is not None or max_pae is not None)
+            and is_local_structure_file(PDB_ID)):
         try:
             pae_data = read_pae(PDB_ID, model=model)
         except (ValueError, KeyError) as e:
             warnings.warn(f'PAE for {PDB_ID} not used: {e}')
         if pae_data is None:
-            warnings.warn(f"No usable PAE file for {PDB_ID}: 'bioplex3d' contacts use "
-                          'the CA distance only, without the pLDDT and PAE conditions.')
+            warnings.warn(f'No usable PAE file for {PDB_ID}: contacts use the CA '
+                          'distance only, without the pLDDT and PAE conditions.')
     interacting_chains_list = _direct_interaction_chain_pairs(
         model, interact_dist_threshold, min_plddt=min_plddt,
-        contact_definition=contact_definition, pae_data=pae_data)
+        contact_atoms=contact_atoms, max_pae=max_pae, pae_data=pae_data)
     chain_types = _classify_chains(model)
 
     # get chain > UniProt ID mappings: user-supplied if given, otherwise

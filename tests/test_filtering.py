@@ -1,7 +1,7 @@
 '''
 Checks for the opt-in confidence filter (filter_contacts_by_score(),
---min-score) and the BioPlex3D contact definition (contact_definition=
-'bioplex3d'), on real predictor output kept outside the repo in
+--min-score) and the contact parameters (BioPlex3D's by default, the
+BioPlex 3.0 paper's as a preset), on real predictor output kept outside the repo in
 ../fold_outputs/. Tests whose data isn't there are skipped.
 
 The cutoff used here, 0.05, is only an illustration: it sits inside the gap
@@ -19,11 +19,12 @@ import warnings
 import pandas as pd
 
 from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
-                                      _bioplex3d_interface, _load_pdb_model,
+                                      _ca_interface, _load_pdb_model,
                                       _read_interface_confidence_or_warn,
                                       compare_structure_contacts_to_BioPlex,
                                       filter_contacts_by_score, find_structure_files,
-                                      interface_score_by_pair, read_pae)
+                                      interface_score_by_pair, read_pae,
+                                      resolve_contact_settings)
 from bioplexpy.cli import _resolve_filter_args, build_parser, summarize_contacts
 
 HERE = os.path.dirname(__file__)
@@ -41,6 +42,9 @@ DECOY_CHAINS = dict(zip('ABCDEFGH', ['P61158', 'P61160', 'Q92747', 'O15144', 'O1
                                      'P59998', 'O15511', DECOY]))
 TFIIH_CHAINS = dict(zip('ABCDEFGH', ['P19447', 'P18074', 'P32780', 'Q92759', 'Q13888',
                                      'Q13889', 'Q6ZYL4', 'P51948']))
+
+
+_BIOPLEX3D = dict(contact_preset='bioplex3d')
 
 
 class Skip(Exception):
@@ -200,19 +204,48 @@ def test_cli_options():
 
     args = parse()
     assert args.min_score is None and not args.compute_scores
-    assert args.contact_definition == 'any_atom'
+    # contacts: BioPlex3D's parameters unless told otherwise
+    assert (args.contact_atoms, args.distance, args.min_plddt, args.max_pae) == (
+        'ca', 8, 50, 10)
+    args = parse('--contact-preset', 'bioplex2021')
+    assert (args.contact_atoms, args.distance, args.min_plddt, args.max_pae) == (
+        'any', 6, None, None)
+    args = parse('--contact-preset', 'bioplex2021', '--min-plddt', '70')
+    assert (args.contact_atoms, args.distance, args.min_plddt) == ('any', 6, 70)
+    args = parse('--distance', '10', '--max-pae', 'none', '--min-plddt', '70')
+    assert (args.contact_atoms, args.distance, args.min_plddt, args.max_pae) == (
+        'ca', 10, 70, None)
+    args = parse('--contact-atoms', 'any')
+    assert (args.contact_atoms, args.distance, args.min_plddt, args.max_pae) == (
+        'any', 8, 50, None)
     args = parse('--min-score', '0.1')
     assert (args.filter_score, args.filter_reduce, args.compute_scores) == (
         'ipsae_calc', 'max', True)
     args = parse('--min-score', '0.3', '--filter-score', 'pair_iptm')
     assert not args.compute_scores
-    assert parse('--contact-definition', 'bioplex3d').contact_definition == 'bioplex3d'
+    for bad in (['--filter-score', 'pair_iptm'],
+                ['--contact-atoms', 'any', '--max-pae', '5']):
+        try:
+            parse(*bad)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f'{bad} should be an error')
+
+
+def test_contact_presets():
+    assert resolve_contact_settings() == dict(contact_atoms='ca', distance=8,
+                                              min_plddt=50, max_pae=10)
+    assert resolve_contact_settings('bioplex2021') == dict(
+        contact_atoms='any', distance=6, min_plddt=None, max_pae=None)
+    assert resolve_contact_settings(min_plddt=None, distance=7) == dict(
+        contact_atoms='ca', distance=7, min_plddt=None, max_pae=10)
     try:
-        parse('--filter-score', 'pair_iptm')
-    except SystemExit:
+        resolve_contact_settings('nope')
+    except ValueError:
         pass
     else:
-        raise AssertionError('--filter-score without --min-score should be an error')
+        raise AssertionError('unknown preset should be an error')
 
 
 def test_bioplex3d_interface_matches_bioplex3d():
@@ -230,7 +263,7 @@ def test_bioplex3d_interface_matches_bioplex3d():
         assert len(rows) == 21
         in_contact = set()
         for _, row in rows.iterrows():
-            contact = _bioplex3d_interface(model, row.chain1, row.chain2, pae_data)
+            contact = _ca_interface(model, row.chain1, row.chain2, pae_data)
             assert (contact.any(axis=1).sum(), contact.any(axis=0).sum(),
                     contact.sum()) == (row.residues1, row.residues2, row.pairs), (tool, row)
             if row.pairs:
@@ -238,19 +271,24 @@ def test_bioplex3d_interface_matches_bioplex3d():
         # and the chain pairs the contact search reports are the non-empty ones
         chain_map = {chain.get_id(): chain.get_id() for chain in model}
         pairs = PDB_to_interacting_chains_uniprot_maps(
-            found[0], None, 6, chain_to_uniprot=chain_map,
-            contact_definition='bioplex3d')[1]
+            found[0], None, chain_to_uniprot=chain_map,
+            **_BIOPLEX3D)[1]
         assert {frozenset(pair) for pair in pairs} == in_contact
+        # each condition can be switched off, and only ever adds contacts
+        loose = PDB_to_interacting_chains_uniprot_maps(
+            found[0], None, 8, chain_to_uniprot=chain_map, contact_atoms='ca')[1]
+        assert len(loose) > len(pairs)
+        assert {frozenset(p) for p in pairs} < {frozenset(p) for p in loose}
 
 
-def test_bioplex3d_definition_without_pae_uses_distance_only():
+def test_ca_contacts_without_pae_use_distance_only():
     pdb = os.path.join(HERE, '..', 'TESTING', 'pdb6nmi.ent')
     _need(pdb)
     chain_map = {chain.get_id(): chain.get_id() for chain in _load_pdb_model(pdb, None)}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         pairs = PDB_to_interacting_chains_uniprot_maps(
-            pdb, None, 6, chain_to_uniprot=chain_map, contact_definition='bioplex3d')[1]
+            pdb, None, chain_to_uniprot=chain_map, **_BIOPLEX3D)[1]
     assert any('CA distance only' in str(w.message) for w in caught)
     any_atom = PDB_to_interacting_chains_uniprot_maps(pdb, None, 6,
                                                       chain_to_uniprot=chain_map)[1]

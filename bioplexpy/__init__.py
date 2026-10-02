@@ -28,6 +28,7 @@ from .analysis_funcs import (
     read_interface_confidence,
     read_pae,
     resampling_test_for_uniprot_list,
+    resolve_contact_settings,
     structure_label,
 )
 from .data_import_funcs import (

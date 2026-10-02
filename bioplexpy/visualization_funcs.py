@@ -1513,10 +1513,11 @@ def display_All_BioPlex_interactions_two_cell_lines(ax, protein_ids,
 
 
 def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
-                            interact_dist_threshold, chain_to_uniprot=None,
-                            min_plddt=None, confidence_score='pair_iptm',
+                            interact_dist_threshold='preset', chain_to_uniprot=None,
+                            min_plddt='preset', confidence_score='pair_iptm',
                             confidence_reduce='mean', interface_confidence=None,
-                            contact_definition='any_atom', filter_score='ipsae_calc',
+                            contact_preset='bioplex3d', contact_atoms='preset',
+                            max_pae='preset', filter_score='ipsae_calc',
                             min_score=None, filter_reduce='max'):
     '''
     Internal helper: everything render_figure2_panels() and
@@ -1532,14 +1533,19 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
                                           filter_contacts_by_score,
                                           get_chain_centroids,
                                           _read_interface_confidence_or_warn,
-                                          is_local_structure_file)
+                                          is_local_structure_file,
+                                          resolve_contact_settings)
 
+    contact = resolve_contact_settings(contact_preset, contact_atoms=contact_atoms,
+                                       distance=interact_dist_threshold,
+                                       min_plddt=min_plddt, max_pae=max_pae)
     chain_to_uniprot, interacting_uniprot_ids, chain_types = (
         PDB_to_interacting_chains_uniprot_maps(PDB_ID, protein_structure_dir,
-                                               interact_dist_threshold,
+                                               contact['distance'],
                                                chain_to_uniprot=chain_to_uniprot,
-                                               min_plddt=min_plddt,
-                                               contact_definition=contact_definition))
+                                               min_plddt=contact['min_plddt'],
+                                               contact_atoms=contact['contact_atoms'],
+                                               max_pae=contact['max_pae']))
 
     chain_color_palette = get_chain_color_palette(list(chain_types.keys()))
     node_color_palette = get_uniprot_color_palette(chain_to_uniprot, chain_color_palette)
@@ -1661,11 +1667,11 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
 
 
 def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
-    interact_dist_threshold=6, figsize=(16, 5.5), node_size=1400,
-    edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt=None,
+    interact_dist_threshold='preset', figsize=(16, 5.5), node_size=1400,
+    edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt='preset',
     confidence_style='alpha', confidence_score='pair_iptm', confidence_reduce='mean',
-    interface_confidence=None, contact_definition='any_atom', filter_score='ipsae_calc',
-    min_score=None, filter_reduce='max'):
+    interface_confidence=None, contact_preset='bioplex3d', contact_atoms='preset',
+    max_pae='preset', filter_score='ipsae_calc', min_score=None, filter_reduce='max'):
     '''
     Reproduce Figure 2F-H of Huttlin et al. 2021 for a given PDB structure:
     finds direct interactions from the structure, overlays BioPlex AP-MS
@@ -1685,7 +1691,9 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     directory to store PDB file: str
     DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
     DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
-    Direct-contact distance threshold (Angstroms): int (optional)
+    interact_dist_threshold: float (optional)
+        Direct-contact distance in angstroms; by default the preset's
+        (see contact_preset).
     figsize: tuple (optional)
     Size of Nodes in Network: int (optional)
     Width of Edges in Network: float (optional)
@@ -1694,9 +1702,9 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
         Chain ID -> UniProt ID(s). Required when PDB_ID is a local
         structure file (which has no SIFTS mapping); see
         PDB_to_interacting_chains_uniprot_maps().
-    min_plddt: float (optional)
-        For predicted structures: ignore atoms below this pLDDT when
-        finding direct contacts (see PDB_to_interacting_chains_uniprot_maps()).
+    min_plddt: float or None (optional)
+        For predicted structures: minimum pLDDT for a contact; by default
+        the preset's. None switches it off.
     confidence_style: str or None (optional)
         For a predicted model whose predictor wrote per-interface scores
         next to it (see read_interface_confidence()): how the model
@@ -1715,9 +1723,18 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
         Scores to show instead of reading the predictor's confidence file,
         in read_interface_confidence() form -- e.g. with the scores from
         compute_interface_scores() merged in.
-    contact_definition: str (optional)
-        'any_atom' (default) or 'bioplex3d'; see
-        PDB_to_interacting_chains_uniprot_maps().
+    contact_preset: str (optional)
+        What counts as a direct contact. 'bioplex3d' (default): CA atoms
+        closer than 8 A, and for a predicted model both residues with
+        pLDDT >= 50 and PAE <= 10 in at least one direction (an
+        experimental structure has neither, so only the distance applies).
+        'bioplex2021': any two atoms closer than 6 A, the rule of the
+        BioPlex 3.0 paper (Huttlin et al. 2021) -- use it to reproduce the
+        paper's Figure 2. See resolve_contact_settings().
+    contact_atoms, max_pae: (optional)
+        Replace single parameters of the preset, like
+        interact_dist_threshold and min_plddt: contact_atoms 'ca' or
+        'any'; max_pae a number, or None for no PAE condition.
     filter_score, min_score, filter_reduce: (optional)
         Opt-in confidence filter for a predicted model: with min_score
         given, direct contacts whose filter_score (default 'ipsae_calc',
@@ -1737,10 +1754,11 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
                                        bp_hct116_df, interact_dist_threshold,
                                        chain_to_uniprot=chain_to_uniprot,
                                        min_plddt=min_plddt,
+                                       contact_preset=contact_preset,
+                                       contact_atoms=contact_atoms, max_pae=max_pae,
                                        confidence_score=confidence_score,
                                        confidence_reduce=confidence_reduce,
                                        interface_confidence=interface_confidence,
-                                       contact_definition=contact_definition,
                                        filter_score=filter_score, min_score=min_score,
                                        filter_reduce=filter_reduce)
     structure_view = render_pdb_structure_py3Dmol(
@@ -1968,12 +1986,12 @@ def _wrap_title(title, width=40):
 
 
 def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
-    interact_dist_threshold=6, figsize=(20, 5.5), node_size=1400, edge_width=2.5,
+    interact_dist_threshold='preset', figsize=(20, 5.5), node_size=1400, edge_width=2.5,
     node_font_size=9, structure_width=800, structure_height=800,
-    chain_to_uniprot=None, min_plddt=None, confidence_style='alpha',
+    chain_to_uniprot=None, min_plddt='preset', confidence_style='alpha',
     confidence_score='pair_iptm', confidence_reduce='mean',
-    interface_confidence=None, contact_definition='any_atom', filter_score='ipsae_calc',
-    min_score=None, filter_reduce='max'):
+    interface_confidence=None, contact_preset='bioplex3d', contact_atoms='preset',
+    max_pae='preset', filter_score='ipsae_calc', min_score=None, filter_reduce='max'):
     '''
     Like render_figure2_panels(), but produces a single static, 4-panel
     matplotlib Figure -- the PDB structure (via PyMOL,
@@ -1989,7 +2007,9 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     directory to store PDB file: str
     DataFrame of 293T PPIs: Pandas DataFrame (from getBioPlex('293T', ...))
     DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
-    Direct-contact distance threshold (Angstroms): int (optional)
+    interact_dist_threshold: float (optional)
+        Direct-contact distance in angstroms; by default the preset's
+        (see contact_preset).
     figsize: tuple (optional)
     Size of Nodes in Network: int (optional)
     Width of Edges in Network: float (optional)
@@ -2000,9 +2020,9 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
         Chain ID -> UniProt ID(s). Required when PDB_ID is a local
         structure file (which has no SIFTS mapping); see
         PDB_to_interacting_chains_uniprot_maps().
-    min_plddt: float (optional)
-        For predicted structures: ignore atoms below this pLDDT when
-        finding direct contacts (see PDB_to_interacting_chains_uniprot_maps()).
+    min_plddt: float or None (optional)
+        For predicted structures: minimum pLDDT for a contact; by default
+        the preset's. None switches it off.
     confidence_style: str or None (optional)
         For a predicted model whose predictor wrote per-interface scores
         next to it (see read_interface_confidence()): how the model
@@ -2021,9 +2041,18 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
         Scores to show instead of reading the predictor's confidence file,
         in read_interface_confidence() form -- e.g. with the scores from
         compute_interface_scores() merged in.
-    contact_definition: str (optional)
-        'any_atom' (default) or 'bioplex3d'; see
-        PDB_to_interacting_chains_uniprot_maps().
+    contact_preset: str (optional)
+        What counts as a direct contact. 'bioplex3d' (default): CA atoms
+        closer than 8 A, and for a predicted model both residues with
+        pLDDT >= 50 and PAE <= 10 in at least one direction (an
+        experimental structure has neither, so only the distance applies).
+        'bioplex2021': any two atoms closer than 6 A, the rule of the
+        BioPlex 3.0 paper (Huttlin et al. 2021) -- use it to reproduce the
+        paper's Figure 2. See resolve_contact_settings().
+    contact_atoms, max_pae: (optional)
+        Replace single parameters of the preset, like
+        interact_dist_threshold and min_plddt: contact_atoms 'ca' or
+        'any'; max_pae a number, or None for no PAE condition.
     filter_score, min_score, filter_reduce: (optional)
         Opt-in confidence filter for a predicted model: with min_score
         given, direct contacts whose filter_score (default 'ipsae_calc',
@@ -2041,10 +2070,11 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
                                        bp_hct116_df, interact_dist_threshold,
                                        chain_to_uniprot=chain_to_uniprot,
                                        min_plddt=min_plddt,
+                                       contact_preset=contact_preset,
+                                       contact_atoms=contact_atoms, max_pae=max_pae,
                                        confidence_score=confidence_score,
                                        confidence_reduce=confidence_reduce,
                                        interface_confidence=interface_confidence,
-                                       contact_definition=contact_definition,
                                        filter_score=filter_score, min_score=min_score,
                                        filter_reduce=filter_reduce)
     structure_image = render_pdb_structure_static(
@@ -2149,7 +2179,7 @@ def render_figure2_panels_for_uniprots(uniprot_IDs_list, protein_structure_dir,
 
 def render_figure2_panels_from_file(structure_file, bp_293t_df, bp_hct116_df,
                                     chain_to_uniprot=None, uniprot_IDs_list=None,
-                                    min_plddt=None, static=True, **kwargs):
+                                    min_plddt='preset', static=True, **kwargs):
     '''
     Render the Figure 2-style panels for a user's own structure file --
     an experimental model, or a prediction from AlphaFold3, Boltz,
@@ -2171,17 +2201,18 @@ def render_figure2_panels_from_file(structure_file, bp_293t_df, bp_hct116_df,
     DataFrame of HCT116 PPIs: Pandas DataFrame (from getBioPlex('HCT116', ...))
     chain_to_uniprot: dict (optional)
     uniprot_IDs_list: list (optional)
-    min_plddt: float (optional)
-        For predicted structures: ignore atoms below this pLDDT (0-100)
-        when finding direct contacts, so low-confidence regions can't
-        create spurious contacts. Leave unset for experimental structures.
+    min_plddt: float or None (optional)
+        For predicted structures: minimum pLDDT (0-100) for a contact, so
+        low-confidence regions can't create spurious contacts. By default
+        the contact preset's (50 with the default 'bioplex3d' preset; see
+        render_figure2_panels_static()).
     static: bool (optional, default True)
         As in render_figure2_panels_for_uniprots(): True renders one
         static Figure via render_figure2_panels_static() (needs
         pymol-open-source); False uses render_figure2_panels().
     **kwargs
         Passed through to the render function (e.g. figsize,
-        interact_dist_threshold).
+        contact_preset, interact_dist_threshold, max_pae, min_score).
 
     Returns
     -------
