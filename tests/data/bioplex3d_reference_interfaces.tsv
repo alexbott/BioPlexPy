@@ -1,0 +1,46 @@
+# Interface sizes from BioPlex3D's getInterfaceResiduesScores() (bioPlex3D_batchInterfaceMapper.py at commit 12c49e3), run unmodified on one
+# Arp2/3 model per tool in ../fold_outputs (CA < 8 A, pLDDT >= 50, PAE <= 10 in either direction). residues1/2: interface
+# residues of each chain; pairs: residue pairs. Made by contact_definition_eval/scripts/make_bioplex3d_interface_reference.py.
+tool	chain1	chain2	residues1	residues2	pairs
+colabfold	A	B	24	21	55
+colabfold	A	C	0	0	0
+colabfold	A	D	0	0	0
+colabfold	A	E	9	8	16
+colabfold	A	F	0	0	0
+colabfold	A	G	15	18	44
+colabfold	B	C	0	0	0
+colabfold	B	D	5	5	9
+colabfold	B	E	18	13	34
+colabfold	B	F	31	34	71
+colabfold	B	G	16	22	38
+colabfold	C	D	14	10	22
+colabfold	C	E	0	0	0
+colabfold	C	F	0	0	0
+colabfold	C	G	0	0	0
+colabfold	D	E	12	15	31
+colabfold	D	F	33	31	65
+colabfold	D	G	0	0	0
+colabfold	E	F	0	0	0
+colabfold	E	G	0	0	0
+colabfold	F	G	2	1	2
+boltz	A	B	22	20	48
+boltz	A	C	0	0	0
+boltz	A	D	34	29	65
+boltz	A	E	10	14	22
+boltz	A	F	3	6	9
+boltz	A	G	0	0	0
+boltz	B	C	0	0	0
+boltz	B	D	0	0	0
+boltz	B	E	0	0	0
+boltz	B	F	15	18	37
+boltz	B	G	16	13	34
+boltz	C	D	1	1	1
+boltz	C	E	0	0	0
+boltz	C	F	22	16	39
+boltz	C	G	17	16	45
+boltz	D	E	0	0	0
+boltz	D	F	38	32	78
+boltz	D	G	0	0	0
+boltz	E	F	0	0	0
+boltz	E	G	0	0	0
+boltz	F	G	24	25	59

@@ -57,6 +57,38 @@ LIS/cLIS/iLIS, ipSAE); `--reference 6NMI` adds an experimental structure's conta
 table; `--no-render` writes the tables only. See `bioplexpy-structure --help` and
 `TESTING/TESTING BioPlex User Structure Funcs.ipynb`.
 
+### Filtering contacts by score (optional)
+
+By default two chains are a direct contact if any two of their atoms are closer than 6 Å, and
+nothing is filtered by confidence. A predictor can place an unrelated protein against a complex
+closely enough to pass that test. Two opt-in options address this; neither changes the default output.
+
+`--min-score VALUE` hides contacts whose interface score is below `VALUE`. The score is
+`ipsae_calc` (ipSAE computed from the PAE) unless `--filter-score NAME` names another score column,
+e.g. `pair_iptm`.
+
+* A hidden contact is left out of the figure, whose title says how many were hidden. The tables keep
+  it: `structure_contact` is unchanged and a `passes_filter` column says `False`.
+  `summary_contacts.tsv` gains `n_structures_pass`.
+* A contact that has no score is kept and `passes_filter` is left empty. This applies to a model
+  without a PAE file and to contacts with a nucleic acid chain.
+* There is no default cutoff yet. In the one negative control run so far (HSD17B14 folded together
+  with the Arp2/3 complex, AlphaFold3 and Boltz, five models each) every contact with the unrelated
+  protein has `ipsae_calc` 0, and the lowest value on a contact known from an experimental structure
+  is 0.11. One control is too little to fix a number.
+* ipSAE differs by direction (A→B and B→A). The filter tests the larger of the two
+  (`--filter-reduce max`); `mean` and `min` are available. This choice is provisional and still to be
+  confirmed with the BioPlex3D authors.
+
+`--contact-definition bioplex3d` replaces the 6 Å any-atom rule, for pairs of protein chains, with
+the interface definition of the BioPlex3D pipeline: at least one residue pair with CA atoms closer
+than 8 Å, both residues with pLDDT ≥ 50, and PAE ≤ 10 in at least one direction. It needs the
+model's PAE file; without one (e.g. an experimental structure) only the CA distance is used.
+Contacts with nucleic acid chains keep the any-atom rule. The two options can be combined.
+
+In Python: `filter_contacts_by_score()`, and the `contact_definition`, `min_score`, `filter_score`
+and `filter_reduce` arguments of the render functions.
+
 Predicted structures are subject to their predictor's terms; AlphaFold Server output is for
 non-commercial use only (see the `terms_of_use.md` inside the zip).
 

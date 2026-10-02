@@ -9,7 +9,8 @@ For each structure file this writes, into --out-dir:
   <name>_contacts.tsv   structure contacts vs BioPlex 293T/HCT116 edges, plus
                         the predictor's own chain-pair scores for predicted
                         models (AF3/Boltz pair ipTM; ipSAE/pDockQ/pDockQ2 if
-                        a ColabFold scores file holds them)
+                        a ColabFold scores file holds them); with
+                        --min-score, a passes_filter column
   <name>_chain_map.tsv  which UniProt protein each chain was assigned
   <name>_figure.png     the Figure 2-style panels (unless --no-render); a
                         predicted model's chain-pair scores are shown as edge
@@ -20,7 +21,8 @@ and, when two or more structures are processed:
   summary_contacts.tsv  every protein pair, how many of the models have it
                         as a contact, per-model columns, BioPlex columns,
                         and (with --reference) the experimental structure;
-                        per-model score columns named <model>:<score>_AB/_BA
+                        per-model score columns named <model>:<score>_AB/_BA;
+                        with --min-score, n_structures_pass and <model>:pass
 '''
 
 import argparse
@@ -142,6 +144,7 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
     from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
                                           compare_structure_contacts_to_BioPlex,
                                           _read_interface_confidence_or_warn,
+                                          filter_contacts_by_score,
                                           map_chains_to_uniprot)
     from bioplexpy.visualization_funcs import (get_edge_confidence_scores,
                                                render_figure2_panels,
@@ -164,13 +167,21 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
 
     maps = PDB_to_interacting_chains_uniprot_maps(
         structure_file, None, args.distance, chain_to_uniprot=file_chain_map,
-        min_plddt=args.min_plddt)
+        min_plddt=args.min_plddt, contact_definition=args.contact_definition)
     # the predictor's own chain-pair scores, if it wrote any next to the model
     # (with --compute-scores, plus scores calculated here from the PAE)
     interface_confidence = _read_interface_confidence_or_warn(
         structure_file, chain_ids=list(maps[2]), compute_scores=args.compute_scores)
+    # opt-in (--min-score): the table keeps every contact and says which
+    # ones the filter rejected; the figure leaves those out
+    filter_status = None
+    if args.min_score is not None:
+        _, filter_status = filter_contacts_by_score(
+            maps[1], maps[0], interface_confidence, score=args.filter_score,
+            min_score=args.min_score, reduce=args.filter_reduce)
     contacts_df = compare_structure_contacts_to_BioPlex(
-        *maps, bp_293t_df, bp_hct116_df, interface_confidence=interface_confidence)
+        *maps, bp_293t_df, bp_hct116_df, interface_confidence=interface_confidence,
+        filter_status=filter_status)
     contacts_df.to_csv(os.path.join(args.out_dir, f'{name}_contacts.tsv'),
                        sep='\t', index=False)
 
@@ -188,7 +199,11 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                                  min_plddt=args.min_plddt, confidence_style=style,
                                  confidence_score=args.confidence_score,
                                  confidence_reduce=args.confidence_reduce,
-                                 interface_confidence=interface_confidence)
+                                 interface_confidence=interface_confidence,
+                                 contact_definition=args.contact_definition,
+                                 filter_score=args.filter_score,
+                                 min_score=args.min_score,
+                                 filter_reduce=args.filter_reduce)
             if args.interactive:
                 fig, view = render_figure2_panels(structure_file, None, bp_293t_df,
                                                   bp_hct116_df, **render_kwargs)
@@ -209,6 +224,10 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                + f'; {len(contacts)} protein contacts, '
                f'{int(contacts.bioplex_293T.sum())} seen in 293T, '
                f'{int(contacts.bioplex_HCT116.sum())} in HCT116')
+    if args.min_score is not None:
+        n_hidden = int((contacts.passes_filter == False).sum())  # noqa: E712
+        summary += (f'; {n_hidden} hidden by {args.filter_score} < {args.min_score:g}, '
+                    f'{int(contacts.passes_filter.isna().sum())} unscored (kept)')
     if interface_confidence is not None:
         summary += (f"; {interface_confidence['tool']} scores "
                     f"({', '.join(interface_confidence['scores'])}) from "
@@ -232,7 +251,8 @@ def reference_contacts(reference, args, chain_map, uniprots):
     # a PDB ID is downloaded to a throwaway directory, not into --out-dir
     with tempfile.TemporaryDirectory() as download_dir:
         chain_to_uniprot, interacting, chain_types = PDB_to_interacting_chains_uniprot_maps(
-            reference, download_dir, args.distance, chain_to_uniprot=ref_chain_map)
+            reference, download_dir, args.distance, chain_to_uniprot=ref_chain_map,
+            contact_definition=args.contact_definition)
     protein_ids = {id_i for chain_id, ids in chain_to_uniprot.items()
                    if chain_types.get(chain_id) == 'protein' for id_i in ids}
     return {frozenset(pair) for pair in interacting if set(pair) <= protein_ids}
@@ -249,9 +269,16 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
     Any chain-pair score columns in the per-structure tables are carried
     over per structure, as <name>:<score>_AB/_BA (oriented to this
     table's UniprotA/UniprotB).
+
+    If the tables have a passes_filter column (--min-score), the contact
+    counts stay as they are, and n_structures_pass /
+    fraction_structures_pass count the structures where the pair is a
+    contact the filter did not reject (an unscored contact counts), with
+    one <name>:pass column per structure.
     '''
     base_columns = {'UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
-                    'bioplex_293T', 'bioplex_HCT116'}
+                    'passes_filter', 'bioplex_293T', 'bioplex_HCT116'}
+    filtered = any('passes_filter' in df for df in contacts_by_name.values())
     rows, score_columns = {}, []
     for name, df in contacts_by_name.items():
         scores = [c for c in df.columns if c not in base_columns]
@@ -262,6 +289,8 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
                 SymbolA=rec['SymbolA'], SymbolB=rec['SymbolB'],
                 bioplex_293T=rec['bioplex_293T'], bioplex_HCT116=rec['bioplex_HCT116']))
             row[name] = bool(rec['structure_contact'])
+            # passes_filter is True, False or empty: only False is a rejection
+            row[f'{name}:pass'] = row[name] and not rec.get('passes_filter') == False  # noqa: E712
             flipped = rec['UniprotA'] != row['UniprotA']
             for column in scores:
                 target = column
@@ -299,7 +328,15 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
         summary['reference_contact'] = [frozenset((a, b)) in reference for a, b in
                                         zip(summary.UniprotA, summary.UniprotB)]
         columns.append('reference_contact')
-    columns += ['bioplex_293T', 'bioplex_HCT116'] + names
+    pass_columns = [f'{name}:pass' for name in names] if filtered else []
+    if filtered:
+        for column in pass_columns:
+            summary[column] = summary[column].eq(True) if column in summary else False
+        summary['n_structures_pass'] = summary[pass_columns].sum(axis=1).astype(int)
+        summary['fraction_structures_pass'] = (summary.n_structures_pass
+                                               / len(names)).round(3)
+        columns += ['n_structures_pass', 'fraction_structures_pass']
+    columns += ['bioplex_293T', 'bioplex_HCT116'] + names + pass_columns
     for column in score_columns:
         if column not in summary:
             summary[column] = float('nan')
@@ -354,11 +391,20 @@ def build_parser():
                                'pLDDT (0-100) when finding contacts, e.g. 70')
     analysis.add_argument('--distance', type=float, default=6,
                           help='direct-contact distance cutoff in Angstroms (default 6)')
+    analysis.add_argument('--contact-definition', choices=['any-atom', 'bioplex3d'],
+                          default='any-atom',
+                          help='what counts as a direct contact. any-atom (default): any '
+                               'two atoms closer than --distance. bioplex3d: the BioPlex3D '
+                               "pipeline's interface definition for protein pairs -- CA "
+                               'atoms closer than 8 A, both residues pLDDT >= 50, PAE <= '
+                               '10 in at least one direction (needs the PAE file next to '
+                               'the model; without one, the CA distance only); --distance '
+                               'and --min-plddt then only apply to nucleic acid contacts')
     analysis.add_argument('--bioplex-293t-version', default='3.0')
     analysis.add_argument('--bioplex-hct116-version', default='1.0')
 
     confidence = parser.add_argument_group(
-        'interface confidence (predicted models; shown, never used to drop edges)')
+        'interface confidence (predicted models; how scores are shown)')
     confidence.add_argument('--confidence-style', nargs='+', default=['alpha'],
                             choices=['width', 'alpha', 'color', 'none'],
                             help="how the model network's edges show the predictor's "
@@ -386,6 +432,24 @@ def build_parser():
                                  '(default), min or max for the figure; the TSVs '
                                  'keep both')
 
+    filtering = parser.add_argument_group(
+        'confidence filter (predicted models; off unless --min-score is given)')
+    filtering.add_argument('--min-score', type=float, default=None, metavar='VALUE',
+                           help='hide contacts whose --filter-score is below VALUE: they '
+                                'are left out of the figure, and marked passes_filter = '
+                                'False in the tables (structure_contact is unchanged). A '
+                                'contact with no score is kept. There is no default '
+                                'cutoff; on the one decoy tested, decoy contacts have '
+                                'ipsae_calc 0 and the lowest true contact 0.11')
+    filtering.add_argument('--filter-score', default=None, metavar='NAME',
+                           help='score the filter tests (default ipsae_calc, which '
+                                'switches --compute-scores on); any score column works, '
+                                'e.g. pair_iptm')
+    filtering.add_argument('--filter-reduce', choices=['max', 'mean', 'min'], default=None,
+                           help='for a score that differs by direction, the value tested: '
+                                'max (default; either direction is enough), mean or min. '
+                                'Provisional -- to be confirmed with the BioPlex3D authors')
+
     output = parser.add_argument_group('output')
     output.add_argument('--out-dir', default='bioplexpy_structure_out',
                         help='output directory (default ./bioplexpy_structure_out)')
@@ -402,9 +466,23 @@ def build_parser():
     return parser
 
 
+def _resolve_filter_args(parser, args):
+    '''Fill in the filter defaults, and switch on what the options need.'''
+    from bioplexpy.analysis_funcs import COMPUTED_SCORES
+
+    if args.min_score is None and (args.filter_score or args.filter_reduce):
+        parser.error('--filter-score/--filter-reduce only apply with --min-score')
+    args.filter_score = args.filter_score or 'ipsae_calc'
+    args.filter_reduce = args.filter_reduce or 'max'
+    if args.min_score is not None and args.filter_score in COMPUTED_SCORES:
+        args.compute_scores = True
+    args.contact_definition = args.contact_definition.replace('-', '_')
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    _resolve_filter_args(parser, args)
 
     chain_map = _read_chain_map(args.chain_map, args.chain_map_file)
     uniprots = _read_uniprots(args.uniprots, args.uniprots_file)
@@ -419,7 +497,8 @@ def main(argv=None):
 
 def _run(parser, args, chain_map, uniprots, zip_extract_root):
     structure_files, prediction_inputs, display = _collect_structure_files(
-        args.structures, zip_extract_root, include_pae=args.compute_scores)
+        args.structures, zip_extract_root, include_pae=(args.compute_scores
+                     or args.contact_definition == 'bioplex3d'))
     if not structure_files:
         parser.error('no structure files found')
     # one Boltz run over several input files holds several different

@@ -1067,7 +1067,42 @@ def get_interacting_chains_from_PDB(PDB_ID_structure_i, protein_structure_dir, d
     return _direct_interaction_chain_pairs(model, dist_threshold)
 
 
-def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None):
+# how a direct contact between two chains is defined (see
+# PDB_to_interacting_chains_uniprot_maps())
+CONTACT_DEFINITIONS = ('any_atom', 'bioplex3d')
+
+
+def _bioplex3d_interface(model, chain_i_id, chain_j_id, pae_data=None, ca_dist=8,
+                         interface_min_plddt=50, interface_max_pae=10):
+    '''
+    Internal helper: the residue pairs BioPlex3D counts as the interface of
+    two protein chains (getInterfaceResiduesScores() in
+    bioPlex3D_batchInterfaceMapper.py): CA atoms closer than ca_dist, both
+    residues with pLDDT >= interface_min_plddt, and PAE <=
+    interface_max_pae in at least one direction. The pLDDT and PAE
+    conditions need pae_data (from read_pae()); without it only the
+    distance is used.
+
+    Returns a boolean array, [residue of chain i][residue of chain j].
+    '''
+    def ca_coords(chain):
+        return np.array([residue['CA'].coord if 'CA' in residue else [np.nan] * 3
+                         for residue in chain], dtype=float)
+
+    contact = cdist(ca_coords(model[chain_i_id]), ca_coords(model[chain_j_id])) < ca_dist
+    if pae_data is not None:
+        rows_i, rows_j = pae_data['rows'][chain_i_id], pae_data['rows'][chain_j_id]
+        plddt, pae = pae_data['plddt'], pae_data['pae']
+        confident = np.outer(plddt[rows_i] >= interface_min_plddt,
+                             plddt[rows_j] >= interface_min_plddt)
+        aligned = ((pae[np.ix_(rows_i, rows_j)] <= interface_max_pae)
+                   | (pae[np.ix_(rows_j, rows_i)].T <= interface_max_pae))
+        contact = contact & confident & aligned
+    return contact
+
+
+def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None,
+                                    contact_definition='any_atom', pae_data=None):
     '''
     Internal helper: compute directly-interacting chain pairs for an
     already-loaded Bio.PDB model. Factored out of
@@ -1079,8 +1114,19 @@ def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None):
     it are left out of the contact search, so low-confidence regions
     (e.g. disordered loops placed arbitrarily by the predictor) can't
     create spurious chain-chain contacts.
+
+    With contact_definition='bioplex3d', two protein chains are in contact
+    if _bioplex3d_interface() finds any residue pair (pae_data, from
+    read_pae(), adds its pLDDT and PAE conditions); dist_threshold and
+    min_plddt then only apply to pairs that involve a nucleic acid chain,
+    which keep the any-atom rule.
     '''
+    if contact_definition not in CONTACT_DEFINITIONS:
+        raise ValueError(f'contact_definition must be one of {list(CONTACT_DEFINITIONS)}, '
+                         f"got '{contact_definition}'")
     plddt_scale = _plddt_scale_factor(model) if min_plddt is not None else None
+    chain_kind = ({chain.get_id(): classify_chain(chain) for chain in model}
+                  if contact_definition == 'bioplex3d' else {})
 
     def keep(atom):
         if atom.get_parent().id[0] != ' ':
@@ -1099,6 +1145,15 @@ def _direct_interaction_chain_pairs(model, dist_threshold, min_plddt=None):
     chain_pairs_direct_interaction = []
     # iterate through all chain pairs and check to see if any atoms are close
     for chain_i_id, chain_j_id in possible_chain_pairs:
+
+        if chain_kind.get(chain_i_id) == 'protein' and chain_kind.get(chain_j_id) == 'protein':
+            # a chain read_pae() has no rows for can't be checked against the PAE
+            pair_pae = (pae_data if pae_data is not None
+                        and chain_i_id in pae_data['rows']
+                        and chain_j_id in pae_data['rows'] else None)
+            if _bioplex3d_interface(model, chain_i_id, chain_j_id, pair_pae).any():
+                chain_pairs_direct_interaction.append([chain_i_id, chain_j_id])
+            continue
 
         # get chain objects from models
         chain_i = model[chain_i_id]
@@ -1351,7 +1406,8 @@ def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
                                            protein_structure_dir,
                                            interact_dist_threshold,
                                            chain_to_uniprot=None,
-                                           min_plddt=None):
+                                           min_plddt=None,
+                                           contact_definition='any_atom'):
     '''
     Get interacting chains from PDB structure mapped to UniProt IDs and
     PDB chain to UniProt mappings.
@@ -1390,6 +1446,19 @@ def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
         (0-100 scale) when finding direct contacts. See
         _plddt_scale_factor(); skipped with a warning if the B-factor
         column doesn't hold pLDDT values.
+    contact_definition: str (optional)
+        What counts as a direct contact between two chains.
+        'any_atom' (default): any pair of polymer atoms closer than the
+        distance threshold.
+        'bioplex3d': the interface definition of the BioPlex3D pipeline,
+        for pairs of protein chains -- at least one residue pair with CA
+        atoms closer than 8 A, both residues with pLDDT >= 50 and PAE <= 10
+        in at least one direction. The pLDDT and PAE conditions need the
+        model's PAE file (see read_pae()); for a structure without one
+        (e.g. an experimental structure) only the CA distance is used.
+        The distance threshold and min_plddt are not used for protein
+        pairs. Pairs involving a nucleic acid chain, which BioPlex3D does
+        not cover, keep the 'any_atom' rule.
 
     Returns
     -------
@@ -1409,8 +1478,18 @@ def PDB_to_interacting_chains_uniprot_maps(PDB_ID,
     # load the structure once and reuse it for both the direct-interaction
     # search and the chain classification (avoids downloading it twice)
     model = _load_pdb_model(PDB_ID, protein_structure_dir)
+    pae_data = None
+    if contact_definition == 'bioplex3d' and is_local_structure_file(PDB_ID):
+        try:
+            pae_data = read_pae(PDB_ID, model=model)
+        except (ValueError, KeyError) as e:
+            warnings.warn(f'PAE for {PDB_ID} not used: {e}')
+        if pae_data is None:
+            warnings.warn(f"No usable PAE file for {PDB_ID}: 'bioplex3d' contacts use "
+                          'the CA distance only, without the pLDDT and PAE conditions.')
     interacting_chains_list = _direct_interaction_chain_pairs(
-        model, interact_dist_threshold, min_plddt=min_plddt)
+        model, interact_dist_threshold, min_plddt=min_plddt,
+        contact_definition=contact_definition, pae_data=pae_data)
     chain_types = _classify_chains(model)
 
     # get chain > UniProt ID mappings: user-supplied if given, otherwise
@@ -2278,6 +2357,113 @@ def interface_confidence_by_uniprot(interface_confidence, chain_to_UniProt_mappi
     return by_uniprot
 
 
+# ways to combine the A->B and B->A values of a directional score
+_REDUCERS = {'mean': np.mean, 'min': min, 'max': max}
+
+
+def interface_score_by_pair(interface_confidence, chain_to_UniProt_mapping_dict,
+                            score, reduce='max'):
+    '''
+    One value of one score per protein pair, from a predicted model's
+    chain-pair scores. Some scores differ by direction (Boltz pair ipTM,
+    ipSAE, pDockQ2, LIS); the A->B and B->A values are combined with
+    `reduce`.
+
+    Parameters
+    ----------
+    interface_confidence: dict (from read_interface_confidence() or
+        compute_interface_scores())
+    Chain to UniProt Map: dict
+    score: str
+        Name of the score, e.g. 'ipsae_calc' or 'pair_iptm'.
+    reduce: str (optional)
+        'max' (default), 'mean' or 'min' of the two directions.
+
+    Returns
+    -------
+    dict or None
+        frozenset({UniProt_i, UniProt_j}) -> value, without the pairs whose
+        value is missing; None if the model has no such score.
+    '''
+    if reduce not in _REDUCERS:
+        raise ValueError(f"reduce must be one of {list(_REDUCERS)}, got '{reduce}'")
+    if interface_confidence is None or score not in interface_confidence['scores']:
+        return None
+    directed = interface_confidence_by_uniprot(
+        interface_confidence, chain_to_UniProt_mapping_dict)[score]
+    by_pair = {}
+    for (id_i, id_j), value in directed.items():
+        if value is not None and not np.isnan(value):
+            by_pair.setdefault(frozenset((id_i, id_j)), []).append(value)
+    return {pair: float(_REDUCERS[reduce](values)) for pair, values in by_pair.items()}
+
+
+def filter_contacts_by_score(interacting_UniProt_IDs, chain_to_UniProt_mapping_dict,
+                             interface_confidence, score='ipsae_calc', min_score=None,
+                             reduce='max'):
+    '''
+    Opt-in confidence filter for a predicted model's direct contacts: keep
+    a contact only if its chain-pair score reaches a cutoff.
+
+    A contact with no value for the score is kept, never dropped, and
+    reported as 'unscored': the filter only removes what it could judge.
+    That covers a model without the score (e.g. no PAE file for a computed
+    score), and contacts with a nucleic acid chain, which the computed
+    scores do not cover.
+
+    There is no default cutoff. On the one decoy tested so far (HSD17B14
+    folded with the Arp2/3 complex, AlphaFold3 and Boltz) every decoy
+    contact has 'ipsae_calc' 0, and the lowest true contact seen is 0.11,
+    but that is too little to fix a number.
+
+    Parameters
+    ----------
+    Interacting UniProt/synthetic IDs: list (from
+        PDB_to_interacting_chains_uniprot_maps())
+    Chain to UniProt Map: dict
+    interface_confidence: dict or None (from read_interface_confidence()
+        and/or compute_interface_scores())
+    score: str (optional)
+        Score to test (default 'ipsae_calc', from compute_interface_scores()).
+        Any score in interface_confidence can be used.
+    min_score: float (optional)
+        Keep contacts with score >= min_score. None (default) switches the
+        filter off: the contacts are returned unchanged.
+    reduce: str (optional)
+        For a score that differs by direction, which value is tested:
+        'max' (default; either direction reaching the cutoff is enough),
+        'mean' or 'min'. The default is provisional: BioPlex3D does not
+        filter on ipSAE, so this choice is still to be confirmed with its
+        authors.
+
+    Returns
+    -------
+    list
+        The contacts that are kept (passed or unscored), in input order.
+    dict
+        frozenset({ID_i, ID_j}) -> 'pass', 'fail' or 'unscored' for every
+        input contact; empty if min_score is None.
+    '''
+    if min_score is None:
+        return list(interacting_UniProt_IDs), {}
+    values = interface_score_by_pair(interface_confidence, chain_to_UniProt_mapping_dict,
+                                     score, reduce=reduce)
+    if values is None:
+        warnings.warn(f"No '{score}' score for this model, so no contact could be "
+                      'filtered: all contacts kept as unscored.')
+        values = {}
+    kept, status = [], {}
+    for pair in interacting_UniProt_IDs:
+        key = frozenset(pair)
+        if key not in values:
+            status[key] = 'unscored'
+        else:
+            status[key] = 'pass' if values[key] >= min_score else 'fail'
+        if status[key] != 'fail':
+            kept.append(pair)
+    return kept, status
+
+
 def _bioplex_edges_and_roles(bp_PPI_df, restrict_to=None):
     '''
     Internal helper: the undirected set of BioPlex-detected pairs
@@ -2351,7 +2537,8 @@ def _uniprot_gene_label(uniprot_id):
 def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
                                           interacting_UniProt_IDs, chain_types,
                                           bp_293t_df, bp_hct116_df,
-                                          interface_confidence=None):
+                                          interface_confidence=None,
+                                          filter_status=None):
     '''
     Tabulate how a structure's direct protein-protein contacts line up
     with BioPlex AP-MS interactions in both cell lines -- the numbers
@@ -2374,6 +2561,12 @@ def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
         predictor orders the pair; equal for symmetric scores), to every
         row -- contacts or not -- and NaN where the model has no score.
         Annotation only: no row is added or dropped.
+    filter_status: dict (optional)
+        The second output of filter_contacts_by_score(), run on the same
+        (unfiltered) contacts. Adds a column passes_filter: True or False
+        for a contact the filter judged, empty for a contact it could not
+        score (which is kept) and for rows that are not contacts.
+        structure_contact is not changed by the filter.
 
     Returns
     -------
@@ -2381,8 +2574,9 @@ def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
         One row per pair of proteins in the structure that is a direct
         contact in the structure, a BioPlex interaction in either cell
         line, or both. Columns: UniprotA, UniprotB, SymbolA, SymbolB,
-        structure_contact, bioplex_293T, bioplex_HCT116 (plus any score
-        columns). Nucleic acid and unmapped chains are left out (AP-MS
+        structure_contact, bioplex_293T, bioplex_HCT116 (plus
+        passes_filter and any score columns). Nucleic acid and unmapped
+        chains are left out (AP-MS
         can't detect them).
 
     Examples
@@ -2418,6 +2612,13 @@ def compare_structure_contacts_to_BioPlex(chain_to_UniProt_mapping_dict,
                          bioplex_HCT116=pair in edges_hct116))
     columns = ['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
                'bioplex_293T', 'bioplex_HCT116']
+    if filter_status is not None:
+        passed = {'pass': True, 'fail': False}
+        for row in rows:
+            pair = frozenset((row['UniprotA'], row['UniprotB']))
+            row['passes_filter'] = (passed.get(filter_status.get(pair))
+                                    if row['structure_contact'] else None)
+        columns.append('passes_filter')
     if interface_confidence is not None:
         by_uniprot = interface_confidence_by_uniprot(interface_confidence,
                                                      chain_to_UniProt_mapping_dict)

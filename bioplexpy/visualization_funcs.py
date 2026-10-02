@@ -1036,7 +1036,8 @@ def _style_nucleic_acid_nodes(nodes, G, id_type, node_color_map,
 
 
 # ways display_PDB_direct_interaction_network() can show a per-interface
-# score on each edge; all continuous on a fixed 0-1 scale, no cutoff
+# score on each edge; all continuous on a fixed 0-1 scale (a cutoff is a
+# separate, opt-in step: filter_contacts_by_score())
 CONFIDENCE_STYLES = ('width', 'alpha', 'color')
 _SCORE_NAMES = {'pair_iptm': 'chain-pair ipTM', 'ipsae': 'ipSAE',
                 'pdockq': 'pDockQ', 'pdockq2': 'pDockQ2',
@@ -1045,7 +1046,6 @@ _SCORE_NAMES = {'pair_iptm': 'chain-pair ipTM', 'ipsae': 'ipSAE',
                 'lis': 'LIS (computed)', 'clis': 'cLIS (computed)',
                 'ilis': 'iLIS (computed)', 'ipsae_calc': 'ipSAE (computed)'}
 _TOOL_NAMES = {'af3': 'AlphaFold3', 'boltz': 'Boltz', 'colabfold': 'ColabFold'}
-_REDUCERS = {'mean': np.mean, 'min': min, 'max': max}
 
 
 def get_edge_confidence_scores(interface_confidence, chain_to_UniProt_mapping_dict,
@@ -1080,20 +1080,17 @@ def get_edge_confidence_scores(interface_confidence, chain_to_UniProt_mapping_di
         Legend label naming the tool, the score, and -- when the two
         directions actually differ -- how they were combined.
     '''
-    from bioplexpy.analysis_funcs import interface_confidence_by_uniprot
+    from bioplexpy.analysis_funcs import (interface_confidence_by_uniprot,
+                                          interface_score_by_pair)
 
-    if reduce not in _REDUCERS:
-        raise ValueError(f"reduce must be one of {list(_REDUCERS)}, got '{reduce}'")
-    if interface_confidence is None or score not in interface_confidence['scores']:
+    edge_scores = interface_score_by_pair(
+        interface_confidence, chain_to_UniProt_mapping_dict, score, reduce=reduce)
+    if edge_scores is None:
         return None, None
     directed = interface_confidence_by_uniprot(
         interface_confidence, chain_to_UniProt_mapping_dict)[score]
-    by_pair = {}
-    for (id_i, id_j), value in directed.items():
-        by_pair.setdefault(frozenset((id_i, id_j)), []).append(value)
-    asymmetric = any(len(set(values)) > 1 for values in by_pair.values())
-    edge_scores = {pair: float(_REDUCERS[reduce](values))
-                   for pair, values in by_pair.items()}
+    asymmetric = any(directed.get((id_j, id_i), value) != value
+                     for (id_i, id_j), value in directed.items())
     label = (f"{_TOOL_NAMES.get(interface_confidence['tool'], interface_confidence['tool'])} "
              f"{_SCORE_NAMES.get(score, score)}")
     if asymmetric:
@@ -1254,7 +1251,7 @@ def display_PDB_direct_interaction_network(ax, chain_to_UniProt_mapping_dict,
     For a predicted model, each edge can also show the predictor's own
     confidence in that interface (edge_scores, from
     get_edge_confidence_scores()), on a continuous 0-1 scale with a key
-    below the panel. Nothing is hidden or cut off by score.
+    below the panel. Nothing is hidden or cut off by score here.
 
     Parameters
     ----------
@@ -1518,7 +1515,9 @@ def display_All_BioPlex_interactions_two_cell_lines(ax, protein_ids,
 def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_df,
                             interact_dist_threshold, chain_to_uniprot=None,
                             min_plddt=None, confidence_score='pair_iptm',
-                            confidence_reduce='mean', interface_confidence=None):
+                            confidence_reduce='mean', interface_confidence=None,
+                            contact_definition='any_atom', filter_score='ipsae_calc',
+                            min_score=None, filter_reduce='max'):
     '''
     Internal helper: everything render_figure2_panels() and
     render_figure2_panels_static() both need -- the PDB-direct/UniProt
@@ -1526,9 +1525,11 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     gene-symbol labels -- computed once so the two entry points can't
     drift out of sync with each other.
     '''
-    from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
+    from bioplexpy.analysis_funcs import (COMPUTED_SCORES,
+                                          PDB_to_interacting_chains_uniprot_maps,
                                           _bioplex_symbol_lookup,
                                           _uniprot_gene_label,
+                                          filter_contacts_by_score,
                                           get_chain_centroids,
                                           _read_interface_confidence_or_warn,
                                           is_local_structure_file)
@@ -1537,7 +1538,8 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
         PDB_to_interacting_chains_uniprot_maps(PDB_ID, protein_structure_dir,
                                                interact_dist_threshold,
                                                chain_to_uniprot=chain_to_uniprot,
-                                               min_plddt=min_plddt))
+                                               min_plddt=min_plddt,
+                                               contact_definition=contact_definition))
 
     chain_color_palette = get_chain_color_palette(list(chain_types.keys()))
     node_color_palette = get_uniprot_color_palette(chain_to_uniprot, chain_color_palette)
@@ -1564,11 +1566,22 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
     # a predicted model's own per-interface scores, if the predictor wrote
     # them next to the model file (or the caller's, e.g. with scores from
     # compute_interface_scores() added)
-    edge_scores, confidence_label = None, None
+    edge_scores, confidence_label, filter_note = None, None, None
     if is_local_structure_file(PDB_ID):
         if interface_confidence is None:
             interface_confidence = _read_interface_confidence_or_warn(
-                PDB_ID, chain_ids=list(chain_types))
+                PDB_ID, chain_ids=list(chain_types),
+                compute_scores=min_score is not None and filter_score in COMPUTED_SCORES)
+        # opt-in: contacts scoring below min_score are not drawn (ones with
+        # no score are kept); every panel and the layout use the kept list
+        if min_score is not None:
+            interacting_uniprot_ids, status = filter_contacts_by_score(
+                interacting_uniprot_ids, chain_to_uniprot, interface_confidence,
+                score=filter_score, min_score=min_score, reduce=filter_reduce)
+            n_hidden = sum(value == 'fail' for value in status.values())
+            filter_note = (f'{n_hidden} contact{"" if n_hidden == 1 else "s"} with '
+                           f'{_SCORE_NAMES.get(filter_score, filter_score)} '
+                           f'< {min_score:g} hidden')
         edge_scores, confidence_label = get_edge_confidence_scores(
             interface_confidence, chain_to_uniprot, score=confidence_score,
             reduce=confidence_reduce)
@@ -1592,6 +1605,7 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
         labels=labels,
         edge_scores=edge_scores,
         confidence_label=confidence_label,
+        filter_note=filter_note,
     )
 
 
@@ -1621,7 +1635,10 @@ def _draw_figure2_network_panels(axes, PDB_ID, protein_structure_dir, bp_293t_df
         confidence_label=prepared['confidence_label'])
     # a user's own file may be a prediction, not a PDB entry
     source = 'Model' if is_local_structure_file(PDB_ID) else 'PDB'
-    axes[0].set_title(f'{source} Direct Interaction Network')
+    title = f'{source} Direct Interaction Network'
+    if prepared.get('filter_note'):
+        title += f"\n({prepared['filter_note']})"
+    axes[0].set_title(title)
     axes[0].axis('off')
 
     display_BioPlex_direct_interactions(
@@ -1647,7 +1664,8 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
     interact_dist_threshold=6, figsize=(16, 5.5), node_size=1400,
     edge_width=2.5, node_font_size=9, chain_to_uniprot=None, min_plddt=None,
     confidence_style='alpha', confidence_score='pair_iptm', confidence_reduce='mean',
-    interface_confidence=None):
+    interface_confidence=None, contact_definition='any_atom', filter_score='ipsae_calc',
+    min_score=None, filter_reduce='max'):
     '''
     Reproduce Figure 2F-H of Huttlin et al. 2021 for a given PDB structure:
     finds direct interactions from the structure, overlays BioPlex AP-MS
@@ -1684,7 +1702,7 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
         next to it (see read_interface_confidence()): how the model
         network's edges show them -- 'alpha' (default), 'width' or
         'color'; None draws plain edges. No effect on experimental
-        structures. Annotation only: no edge is removed.
+        structures. The style itself removes no edge (see min_score).
     confidence_score: str (optional)
         Which score: 'pair_iptm' (AlphaFold3/Boltz chain-pair ipTM;
         default), or 'ipsae'/'pdockq'/'pdockq2' if the model's ColabFold
@@ -1697,6 +1715,16 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
         Scores to show instead of reading the predictor's confidence file,
         in read_interface_confidence() form -- e.g. with the scores from
         compute_interface_scores() merged in.
+    contact_definition: str (optional)
+        'any_atom' (default) or 'bioplex3d'; see
+        PDB_to_interacting_chains_uniprot_maps().
+    filter_score, min_score, filter_reduce: (optional)
+        Opt-in confidence filter for a predicted model: with min_score
+        given, direct contacts whose filter_score (default 'ipsae_calc',
+        computed here from the PAE if interface_confidence is not passed)
+        is below it are not drawn, in any panel, and the model network's
+        title says so. Contacts with no score are kept. Off by default;
+        see filter_contacts_by_score().
 
     Returns
     -------
@@ -1711,7 +1739,10 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
                                        min_plddt=min_plddt,
                                        confidence_score=confidence_score,
                                        confidence_reduce=confidence_reduce,
-                                       interface_confidence=interface_confidence)
+                                       interface_confidence=interface_confidence,
+                                       contact_definition=contact_definition,
+                                       filter_score=filter_score, min_score=min_score,
+                                       filter_reduce=filter_reduce)
     structure_view = render_pdb_structure_py3Dmol(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         rotation=prepared['structure_rotation'], center=prepared['structure_center'])
@@ -1941,7 +1972,8 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
     node_font_size=9, structure_width=800, structure_height=800,
     chain_to_uniprot=None, min_plddt=None, confidence_style='alpha',
     confidence_score='pair_iptm', confidence_reduce='mean',
-    interface_confidence=None):
+    interface_confidence=None, contact_definition='any_atom', filter_score='ipsae_calc',
+    min_score=None, filter_reduce='max'):
     '''
     Like render_figure2_panels(), but produces a single static, 4-panel
     matplotlib Figure -- the PDB structure (via PyMOL,
@@ -1976,7 +2008,7 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
         next to it (see read_interface_confidence()): how the model
         network's edges show them -- 'alpha' (default), 'width' or
         'color'; None draws plain edges. No effect on experimental
-        structures. Annotation only: no edge is removed.
+        structures. The style itself removes no edge (see min_score).
     confidence_score: str (optional)
         Which score: 'pair_iptm' (AlphaFold3/Boltz chain-pair ipTM;
         default), or 'ipsae'/'pdockq'/'pdockq2' if the model's ColabFold
@@ -1989,6 +2021,16 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
         Scores to show instead of reading the predictor's confidence file,
         in read_interface_confidence() form -- e.g. with the scores from
         compute_interface_scores() merged in.
+    contact_definition: str (optional)
+        'any_atom' (default) or 'bioplex3d'; see
+        PDB_to_interacting_chains_uniprot_maps().
+    filter_score, min_score, filter_reduce: (optional)
+        Opt-in confidence filter for a predicted model: with min_score
+        given, direct contacts whose filter_score (default 'ipsae_calc',
+        computed here from the PAE if interface_confidence is not passed)
+        is below it are not drawn, in any panel, and the model network's
+        title says so. Contacts with no score are kept. Off by default;
+        see filter_contacts_by_score().
 
     Returns
     -------
@@ -2001,7 +2043,10 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
                                        min_plddt=min_plddt,
                                        confidence_score=confidence_score,
                                        confidence_reduce=confidence_reduce,
-                                       interface_confidence=interface_confidence)
+                                       interface_confidence=interface_confidence,
+                                       contact_definition=contact_definition,
+                                       filter_score=filter_score, min_score=min_score,
+                                       filter_reduce=filter_reduce)
     structure_image = render_pdb_structure_static(
         PDB_ID, protein_structure_dir, prepared['chain_color_palette'],
         width=structure_width, height=structure_height,
