@@ -97,23 +97,31 @@ the predictors' scores are on different scales:
 | AlphaFold3 | 0.2 |
 | ColabFold | none (not calibrated; the filter stays off, with a warning) |
 
-These come from a calibration on small human complexes of known structure, each folded together
-with an unrelated protein, and on pairs of unrelated proteins folded alone (72 unrelated pairs per
-predictor). What the suggested cutoffs do and do not do there:
+The values were chosen on a calibration set (small human complexes of known structure, each
+folded together with an unrelated protein, and pairs of unrelated proteins folded alone; 72
+unrelated pairs per predictor).
 
-* With the default contact parameters alone, a contact with an unrelated protein was called in
-  about 1 job in 10. The suggested cutoff removes most of these.
-* It does not remove all of them. A few unrelated pairs were predicted confidently and
-  reproducibly, with scores inside the range of real contacts (up to 0.35 with Boltz and 0.45 with
-  AlphaFold3). No cutoff separates those without losing many real contacts.
-* It costs about 2 real contacts in 25 (contacts present in the experimental structure and placed
-  correctly by the model).
-* With Boltz, a falsely docked protein is usually in the top-ranked model and absent from most of
-  the others, since the ranking favours models in which every chain is docked. Giving every model
-  of a run and reading `n_structures_pass` in `summary_contacts.tsv` shows this. With AlphaFold3
-  the models of one run agree with each other, so this does not help.
-* Whether BioPlex detects the pair (`bioplex_293T`, `bioplex_HCT116`) is independent evidence: none
-  of the unrelated pairs that were called is a BioPlex interaction.
+**Boltz (0.3) has since been tested on pairs it was not chosen on:** 200 pairs of unrelated
+proteins and 100 known pairs (a BioPlex interaction in direct contact in an experimental
+structure), each folded as a pair with ten models.
+
+* With the default contact parameters, a contact was called in the top-ranked model for about 40
+  in 100 unrelated pairs. Adding ipSAE >= 0.3 left 15 to 19 in 100, and kept 72 of the 75 known
+  pairs that were called and correctly placed.
+* Small pairs are called far more often than large ones: about three quarters of unrelated pairs
+  of 300 residues or fewer, against about one in five above 600.
+* A contact that passes the cutoff is not thereby correctly placed: of 23 known pairs that Boltz
+  placed wrongly, 9 passed.
+* The cutoff reduces false calls; it does not make a single call reliable. Agreement between the
+  models of a run (next section) and independent evidence are stronger: none of the unrelated
+  pairs is a BioPlex interaction (`bioplex_293T`, `bioplex_HCT116`).
+* No higher cutoff does better: up to 0.6, unrelated pairs and known pairs are lost together.
+
+**AlphaFold3 (0.2) has not been tested this way.** The value rests on 38 calibration jobs (72
+unrelated pairs) only. There it removed most contacts with an unrelated protein, but one
+unrelated pair was predicted confidently in every model of five seeds (ipSAE up to 0.45), and
+the models of one AlphaFold3 run agree with each other, so counting models does not help. Treat
+it as provisional.
 
 The values are a single table, `SUGGESTED_MIN_SCORE` in `bioplexpy/analysis_funcs.py`.
 
@@ -128,6 +136,32 @@ The values are a single table, `SUGGESTED_MIN_SCORE` in `bioplexpy/analysis_func
 
 In Python: `filter_contacts_by_score()`, and the `min_score` (a number or `'suggested'`),
 `filter_score` and `filter_reduce` arguments of the render functions.
+
+### Several models of one prediction
+
+Give every model of a run, not only the top-ranked one. After a run on more than one structure,
+`bioplexpy-structure` prints for each protein pair in how many of them it is a direct contact
+(and, with `--min-score`, in how many it passes the filter); `summary_contacts.tsv` has the same
+numbers as `n_structures_contact` and `n_structures_pass`:
+
+```
+Contacts across the 10 structures:
+  CDK4-LAMTOR4: contact in 7 of 10 (6 pass the score filter)
+```
+
+This is information, not a filter. What it meant in the Boltz test above (ten models per pair):
+
+* A known pair that Boltz placed correctly was a contact in all ten models in 70 of 77 cases.
+* Of the 85 unrelated pairs called in at least one model, 58 were called in four models or
+  fewer, and 8 in all ten.
+* Counting a pair only if it is a contact in at least five of ten models left 10 to 17 in 100
+  unrelated pairs, and 3 to 6 in 100 with ipSAE >= 0.3 as well, for 68 of 100 known pairs kept.
+* The top-ranked model is the wrong one to judge from alone: where only some models had the false
+  contact, the top-ranked model was nearly always one of them. Boltz ranks its models by a
+  confidence score that rewards a docked chain.
+
+For Boltz, ten models per prediction (`--diffusion_samples 10`) are recommended. These numbers are
+from one seed; how much the count changes between seeds has not been measured yet.
 
 Predicted structures are subject to their predictor's terms; AlphaFold Server output is for
 non-commercial use only (see the `terms_of_use.md` inside the zip).

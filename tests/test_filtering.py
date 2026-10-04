@@ -26,7 +26,8 @@ from bioplexpy.analysis_funcs import (SUGGESTED_MIN_SCORE,
                                       filter_contacts_by_score, find_structure_files,
                                       interface_score_by_pair, read_pae,
                                       resolve_contact_settings, resolve_min_score)
-from bioplexpy.cli import _resolve_filter_args, build_parser, summarize_contacts
+from bioplexpy.cli import (_resolve_filter_args, agreement_lines, build_parser,
+                           summarize_contacts)
 
 HERE = os.path.dirname(__file__)
 FOLDS = os.environ.get('BIOPLEXPY_FOLD_OUTPUTS', os.path.join(HERE, '..', '..', 'fold_outputs'))
@@ -334,6 +335,23 @@ def test_ca_contacts_without_pae_use_distance_only():
     # neither rule contains the other in general (6YW7 has CA pairs under
     # 8 A with no atoms under 6 A); on 6NMI they give the same chain pairs
     assert pairs and {frozenset(p) for p in pairs} == {frozenset(p) for p in any_atom}
+
+
+def test_agreement_lines_count_structures():
+    # the lines printed after a run on several models: in how many a pair is a contact, and
+    # with a score filter in how many it passes; a model with no contact still counts
+    columns = ['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
+               'bioplex_293T', 'bioplex_HCT116']
+    hit = pd.DataFrame([['P1', 'P2', 'A', 'B', True, False, False]], columns=columns)
+    miss = pd.DataFrame([], columns=columns)
+    lines = agreement_lines(summarize_contacts({'m0': hit, 'm1': hit, 'm2': miss}, None, None), 3)
+    assert lines == ['Contacts across the 3 structures:', '  A-B: contact in 2 of 3']
+    passed, failed = hit.assign(passes_filter=True), hit.assign(passes_filter=False)
+    lines = agreement_lines(summarize_contacts({'m0': passed, 'm1': failed, 'm2': miss},
+                                               None, None), 3)
+    assert lines[1] == '  A-B: contact in 2 of 3 (1 pass the score filter)'
+    assert agreement_lines(summarize_contacts({'m0': miss, 'm1': miss}, None, None), 2)[1] \
+        == '  none'
 
 
 if __name__ == '__main__':

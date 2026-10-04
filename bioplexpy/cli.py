@@ -265,6 +265,28 @@ def reference_contacts(reference, args, chain_map, uniprots):
     return {frozenset(pair) for pair in interacting if set(pair) <= protein_ids}
 
 
+def agreement_lines(summary, n_structures):
+    '''
+    One line per protein pair that is a direct contact in at least one
+    structure: in how many of the structures it is one, and -- with
+    --min-score -- in how many it also passes the score filter. Printed
+    after a run on several structures (e.g. the models of one prediction),
+    because a contact that only a few of the models have is weaker
+    evidence than one they all have. Takes the table from
+    summarize_contacts().
+    '''
+    lines = [f'Contacts across the {n_structures} structures:']
+    for row in summary[summary.n_structures_contact > 0].itertuples():
+        line = (f'  {row.SymbolA}-{row.SymbolB}: contact in {row.n_structures_contact} '
+                f'of {n_structures}')
+        if 'n_structures_pass' in summary:
+            line += f' ({row.n_structures_pass} pass the score filter)'
+        lines.append(line)
+    if len(lines) == 1:
+        lines.append('  none')
+    return lines
+
+
 def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=None):
     '''
     Combine per-structure contact tables (from
@@ -613,8 +635,11 @@ def _run(parser, args, chain_map, uniprots, zip_extract_root):
             except Exception as e:
                 failures += 1
                 print(f'reference {args.reference}: FAILED -- {e}', file=sys.stderr)
-        summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference).to_csv(
-            os.path.join(args.out_dir, 'summary_contacts.tsv'), sep='\t', index=False)
+        summary = summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference)
+        summary.to_csv(os.path.join(args.out_dir, 'summary_contacts.tsv'), sep='\t', index=False)
+        if len(contacts_by_name) >= 2:
+            for line in agreement_lines(summary, len(contacts_by_name)):
+                print(line)
 
     print(f'Wrote results for {len(structure_files) - failures}/{len(structure_files)} '
           f'structure(s) to {args.out_dir}', file=sys.stderr)
