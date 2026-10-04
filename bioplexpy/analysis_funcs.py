@@ -2485,6 +2485,43 @@ def interface_score_by_pair(interface_confidence, chain_to_UniProt_mapping_dict,
     return {pair: float(_REDUCERS[reduce](values)) for pair, values in by_pair.items()}
 
 
+# Suggested cutoffs for the opt-in score filter (min_score='suggested',
+# --min-score suggested), per predictor, for 'ipsae_calc' with the default
+# contact parameters. They differ because the predictors' scores are on
+# different scales. From a calibration on small human complexes of known
+# structure, each folded with an unrelated protein (72 unrelated pairs per
+# predictor): these values remove most contacts called with an unrelated
+# protein at a cost of about 2 real contacts in 25. They do not remove all
+# of them -- a few unrelated pairs are predicted with scores well inside
+# the range of real contacts (up to 0.35 with Boltz, 0.45 with AlphaFold3).
+# No value is given for ColabFold, which was not part of the calibration.
+SUGGESTED_MIN_SCORE = {'boltz': 0.3, 'af3': 0.2}
+
+
+def resolve_min_score(min_score, interface_confidence, score='ipsae_calc'):
+    '''
+    The number the score filter uses: min_score itself, or, for
+    min_score='suggested', the suggested cutoff for the predictor that
+    made the model (SUGGESTED_MIN_SCORE; 'ipsae_calc' only).
+
+    Returns None (filter off) for min_score=None, and, with a warning, for
+    'suggested' when there is no suggested value: an unknown predictor or
+    one that was not calibrated.
+    '''
+    if min_score != 'suggested':
+        return min_score
+    if score != 'ipsae_calc':
+        raise ValueError("min_score='suggested' is defined for score 'ipsae_calc' only, "
+                         f"not '{score}'")
+    tool = (interface_confidence or {}).get('tool')
+    if tool not in SUGGESTED_MIN_SCORE:
+        warnings.warn('No suggested score cutoff for this model (predictor: '
+                      f'{tool or "unknown"}; suggested values exist for '
+                      f'{", ".join(SUGGESTED_MIN_SCORE)}): no contact filtered.')
+        return None
+    return SUGGESTED_MIN_SCORE[tool]
+
+
 def filter_contacts_by_score(interacting_UniProt_IDs, chain_to_UniProt_mapping_dict,
                              interface_confidence, score='ipsae_calc', min_score=None,
                              reduce='max'):
@@ -2498,11 +2535,11 @@ def filter_contacts_by_score(interacting_UniProt_IDs, chain_to_UniProt_mapping_d
     score), and contacts with a nucleic acid chain, which the computed
     scores do not cover.
 
-    There is no default cutoff. On the one decoy tested so far (HSD17B14
-    folded with the Arp2/3 complex, AlphaFold3 and Boltz) every decoy
-    contact has 'ipsae_calc' 0, while every other contact in the models
-    tested has 0.12 or more (0.23 or more if the experimental structure
-    has it too). That is too little to fix a number.
+    The filter is off by default. min_score='suggested' uses a cutoff
+    chosen for the predictor that made the model (SUGGESTED_MIN_SCORE:
+    0.3 for Boltz, 0.2 for AlphaFold3, for 'ipsae_calc'). Those values
+    remove most, not all, contacts called with an unrelated protein; see
+    the note at SUGGESTED_MIN_SCORE.
 
     Parameters
     ----------
@@ -2514,9 +2551,10 @@ def filter_contacts_by_score(interacting_UniProt_IDs, chain_to_UniProt_mapping_d
     score: str (optional)
         Score to test (default 'ipsae_calc', from compute_interface_scores()).
         Any score in interface_confidence can be used.
-    min_score: float (optional)
+    min_score: float or 'suggested' (optional)
         Keep contacts with score >= min_score. None (default) switches the
-        filter off: the contacts are returned unchanged.
+        filter off: the contacts are returned unchanged. 'suggested': the
+        suggested cutoff for the model's predictor (resolve_min_score()).
     reduce: str (optional)
         For a score that differs by direction, which value is tested:
         'max' (default; either direction reaching the cutoff is enough),
@@ -2532,6 +2570,7 @@ def filter_contacts_by_score(interacting_UniProt_IDs, chain_to_UniProt_mapping_d
         frozenset({ID_i, ID_j}) -> 'pass', 'fail' or 'unscored' for every
         input contact; empty if min_score is None.
     '''
+    min_score = resolve_min_score(min_score, interface_confidence, score)
     if min_score is None:
         return list(interacting_UniProt_IDs), {}
     values = interface_score_by_pair(interface_confidence, chain_to_UniProt_mapping_dict,

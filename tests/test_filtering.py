@@ -18,13 +18,14 @@ import warnings
 
 import pandas as pd
 
-from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
+from bioplexpy.analysis_funcs import (SUGGESTED_MIN_SCORE,
+                                      PDB_to_interacting_chains_uniprot_maps,
                                       _ca_interface, _load_pdb_model,
                                       _read_interface_confidence_or_warn,
                                       compare_structure_contacts_to_BioPlex,
                                       filter_contacts_by_score, find_structure_files,
                                       interface_score_by_pair, read_pae,
-                                      resolve_contact_settings)
+                                      resolve_contact_settings, resolve_min_score)
 from bioplexpy.cli import _resolve_filter_args, build_parser, summarize_contacts
 
 HERE = os.path.dirname(__file__)
@@ -102,6 +103,39 @@ def test_pass_fail_unscored_and_reduce():
                                                     score='pair_iptm', min_score=0.5)
             assert kept == contacts and set(status.values()) == {'unscored'}
     assert len(caught) == 2 and "No 'pair_iptm' score" in str(caught[0].message)
+
+
+def test_suggested_cutoff_depends_on_the_predictor():
+    '''min_score='suggested': 0.3 for Boltz, 0.2 for AlphaFold3, off otherwise.'''
+    chain_map = {'A': ['P1'], 'B': ['P2']}
+    contacts = [['P1', 'P2']]
+
+    def confidence(tool, value=0.25):
+        return dict(tool=tool, source='x', scores={'ipsae_calc': {
+            ('A', 'B'): value, ('B', 'A'): value}})
+
+    assert SUGGESTED_MIN_SCORE == {'boltz': 0.3, 'af3': 0.2}
+    assert resolve_min_score(0.1, confidence('boltz')) == 0.1
+    assert resolve_min_score(None, confidence('boltz')) is None
+    # the same contact, ipSAE 0.25: hidden for Boltz, kept for AlphaFold3
+    for tool, expected in (('boltz', 'fail'), ('af3', 'pass')):
+        kept, status = filter_contacts_by_score(contacts, chain_map, confidence(tool),
+                                                min_score='suggested')
+        assert status == {frozenset(('P1', 'P2')): expected}, tool
+        assert kept == (contacts if expected == 'pass' else [])
+    # no suggested value: the filter stays off, with a warning
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        for scores in (confidence('colabfold'), None):
+            assert filter_contacts_by_score(contacts, chain_map, scores,
+                                            min_score='suggested') == (contacts, {})
+    assert len(caught) == 2 and 'No suggested score cutoff' in str(caught[0].message)
+    try:
+        resolve_min_score('suggested', confidence('boltz'), score='pair_iptm')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("'suggested' should be refused for pair_iptm")
 
 
 def test_homo_oligomer_uses_best_chain_pair():
@@ -223,7 +257,12 @@ def test_cli_options():
         'ipsae_calc', 'max', True)
     args = parse('--min-score', '0.3', '--filter-score', 'pair_iptm')
     assert not args.compute_scores
+    args = parse('--min-score', 'suggested')
+    assert (args.min_score, args.filter_score, args.compute_scores) == (
+        'suggested', 'ipsae_calc', True)
     for bad in (['--filter-score', 'pair_iptm'],
+                ['--min-score', 'suggested', '--filter-score', 'pair_iptm'],
+                ['--min-score', 'high'],
                 ['--contact-atoms', 'any', '--max-pae', '5']):
         try:
             parse(*bad)

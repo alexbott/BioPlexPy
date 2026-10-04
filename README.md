@@ -88,22 +88,46 @@ distance as an argument, keep the paper's any-atom rule unless given `contact_at
 whose interface score is below `VALUE`. The score is `ipsae_calc` (ipSAE computed from the PAE)
 unless `--filter-score NAME` names another score column, e.g. `pair_iptm`. It is off unless given.
 
+`--min-score suggested` uses a suggested `ipsae_calc` cutoff that depends on the predictor, because
+the predictors' scores are on different scales:
+
+| Predictor | Suggested `ipsae_calc` cutoff |
+|---|---|
+| Boltz | 0.3 |
+| AlphaFold3 | 0.2 |
+| ColabFold | none (not calibrated; the filter stays off, with a warning) |
+
+These come from a calibration on small human complexes of known structure, each folded together
+with an unrelated protein, and on pairs of unrelated proteins folded alone (72 unrelated pairs per
+predictor). What the suggested cutoffs do and do not do there:
+
+* With the default contact parameters alone, a contact with an unrelated protein was called in
+  about 1 job in 10. The suggested cutoff removes most of these.
+* It does not remove all of them. A few unrelated pairs were predicted confidently and
+  reproducibly, with scores inside the range of real contacts (up to 0.35 with Boltz and 0.45 with
+  AlphaFold3). No cutoff separates those without losing many real contacts.
+* It costs about 2 real contacts in 25 (contacts present in the experimental structure and placed
+  correctly by the model).
+* With Boltz, a falsely docked protein is usually in the top-ranked model and absent from most of
+  the others, since the ranking favours models in which every chain is docked. Giving every model
+  of a run and reading `n_structures_pass` in `summary_contacts.tsv` shows this. With AlphaFold3
+  the models of one run agree with each other, so this does not help.
+* Whether BioPlex detects the pair (`bioplex_293T`, `bioplex_HCT116`) is independent evidence: none
+  of the unrelated pairs that were called is a BioPlex interaction.
+
+The values are a single table, `SUGGESTED_MIN_SCORE` in `bioplexpy/analysis_funcs.py`.
+
 * A hidden contact is left out of the figure, whose title says how many were hidden. The tables keep
   it: `structure_contact` is unchanged and a `passes_filter` column says `False`.
   `summary_contacts.tsv` gains `n_structures_pass`.
 * A contact that has no score is kept and `passes_filter` is left empty. This applies to a model
   without a PAE file and to contacts with a nucleic acid chain.
-* There is no default cutoff yet. In the one negative control run so far (HSD17B14 folded together
-  with the Arp2/3 complex, AlphaFold3 and Boltz, five models each) the default contact parameters
-  already leave out every contact with the unrelated protein. Under the 2021 rule those contacts
-  are present and all have `ipsae_calc` 0; the lowest value on any other model contact is 0.12, and
-  the lowest on a contact that is also in the experimental structure is 0.23.
 * ipSAE differs by direction (A→B and B→A). The filter tests the larger of the two
   (`--filter-reduce max`); `mean` and `min` are available. This choice is provisional and still to be
   confirmed with the BioPlex3D authors.
 
-In Python: `filter_contacts_by_score()`, and the `min_score`, `filter_score` and `filter_reduce`
-arguments of the render functions.
+In Python: `filter_contacts_by_score()`, and the `min_score` (a number or `'suggested'`),
+`filter_score` and `filter_reduce` arguments of the render functions.
 
 Predicted structures are subject to their predictor's terms; AlphaFold Server output is for
 non-commercial use only (see the `terms_of_use.md` inside the zip).

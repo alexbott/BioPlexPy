@@ -145,7 +145,8 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                                           compare_structure_contacts_to_BioPlex,
                                           _read_interface_confidence_or_warn,
                                           filter_contacts_by_score,
-                                          map_chains_to_uniprot)
+                                          map_chains_to_uniprot,
+                                          resolve_min_score)
     from bioplexpy.visualization_funcs import (get_edge_confidence_scores,
                                                render_figure2_panels,
                                                render_figure2_panels_static)
@@ -174,11 +175,13 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
         structure_file, chain_ids=list(maps[2]), compute_scores=args.compute_scores)
     # opt-in (--min-score): the table keeps every contact and says which
     # ones the filter rejected; the figure leaves those out
+    # ('suggested' becomes the cutoff for this model's predictor)
     filter_status = None
-    if args.min_score is not None:
+    min_score = resolve_min_score(args.min_score, interface_confidence, args.filter_score)
+    if min_score is not None:
         _, filter_status = filter_contacts_by_score(
             maps[1], maps[0], interface_confidence, score=args.filter_score,
-            min_score=args.min_score, reduce=args.filter_reduce)
+            min_score=min_score, reduce=args.filter_reduce)
     contacts_df = compare_structure_contacts_to_BioPlex(
         *maps, bp_293t_df, bp_hct116_df, interface_confidence=interface_confidence,
         filter_status=filter_status)
@@ -203,7 +206,7 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                                  contact_atoms=args.contact_atoms,
                                  max_pae=args.max_pae,
                                  filter_score=args.filter_score,
-                                 min_score=args.min_score,
+                                 min_score=min_score,
                                  filter_reduce=args.filter_reduce)
             if args.interactive:
                 fig, view = render_figure2_panels(structure_file, None, bp_293t_df,
@@ -225,9 +228,9 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                + f'; {len(contacts)} protein contacts, '
                f'{int(contacts.bioplex_293T.sum())} seen in 293T, '
                f'{int(contacts.bioplex_HCT116.sum())} in HCT116')
-    if args.min_score is not None:
+    if min_score is not None:
         n_hidden = int((contacts.passes_filter == False).sum())  # noqa: E712
-        summary += (f'; {n_hidden} hidden by {args.filter_score} < {args.min_score:g}, '
+        summary += (f'; {n_hidden} hidden by {args.filter_score} < {min_score:g}, '
                     f'{int(contacts.passes_filter.isna().sum())} unscored (kept)')
     if interface_confidence is not None:
         summary += (f"; {interface_confidence['tool']} scores "
@@ -467,13 +470,16 @@ def build_parser():
 
     filtering = parser.add_argument_group(
         'confidence filter (predicted models; off unless --min-score is given)')
-    filtering.add_argument('--min-score', type=float, default=None, metavar='VALUE',
+    filtering.add_argument('--min-score', type=_min_score, default=None, metavar='VALUE',
                            help='hide contacts whose --filter-score is below VALUE: they '
                                 'are left out of the figure, and marked passes_filter = '
                                 'False in the tables (structure_contact is unchanged). A '
-                                'contact with no score is kept. There is no default '
-                                'cutoff; on the one decoy tested, decoy contacts have '
-                                'ipsae_calc 0 and every other model contact 0.12 or more')
+                                'contact with no score is kept. VALUE is a number, or '
+                                '"suggested" for the suggested ipsae_calc cutoff of the '
+                                "model's predictor: 0.3 for Boltz, 0.2 for AlphaFold3 "
+                                '(none for ColabFold). In our calibration these remove '
+                                'most, not all, contacts called with an unrelated protein, '
+                                'and about 2 real contacts in 25')
     filtering.add_argument('--filter-score', default=None, metavar='NAME',
                            help='score the filter tests (default ipsae_calc, which '
                                 'switches --compute-scores on); any score column works, '
@@ -499,6 +505,16 @@ def build_parser():
     return parser
 
 
+def _min_score(value):
+    '''--min-score: a number, or the word "suggested".'''
+    if value == 'suggested':
+        return value
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'a number or "suggested", not {value!r}')
+
+
 def _resolve_filter_args(parser, args):
     '''Fill in the filter defaults, and switch on what the options need.'''
     from bioplexpy.analysis_funcs import COMPUTED_SCORES, resolve_contact_settings
@@ -507,6 +523,9 @@ def _resolve_filter_args(parser, args):
         parser.error('--filter-score/--filter-reduce only apply with --min-score')
     args.filter_score = args.filter_score or 'ipsae_calc'
     args.filter_reduce = args.filter_reduce or 'max'
+    if args.min_score == 'suggested' and args.filter_score != 'ipsae_calc':
+        parser.error('--min-score suggested is defined for ipsae_calc only; give a number '
+                     f'with --filter-score {args.filter_score}')
     if args.min_score is not None and args.filter_score in COMPUTED_SCORES:
         args.compute_scores = True
     # contact parameters: the preset's, unless given

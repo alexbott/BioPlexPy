@@ -1531,6 +1531,7 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
                                           _bioplex_symbol_lookup,
                                           _uniprot_gene_label,
                                           filter_contacts_by_score,
+                                          resolve_min_score,
                                           get_chain_centroids,
                                           _read_interface_confidence_or_warn,
                                           is_local_structure_file,
@@ -1580,6 +1581,7 @@ def _prepare_figure2_inputs(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116
                 compute_scores=min_score is not None and filter_score in COMPUTED_SCORES)
         # opt-in: contacts scoring below min_score are not drawn (ones with
         # no score are kept); every panel and the layout use the kept list
+        min_score = resolve_min_score(min_score, interface_confidence, filter_score)
         if min_score is not None:
             interacting_uniprot_ids, status = filter_contacts_by_score(
                 interacting_uniprot_ids, chain_to_uniprot, interface_confidence,
@@ -1740,8 +1742,9 @@ def render_figure2_panels(PDB_ID, protein_structure_dir, bp_293t_df, bp_hct116_d
         given, direct contacts whose filter_score (default 'ipsae_calc',
         computed here from the PAE if interface_confidence is not passed)
         is below it are not drawn, in any panel, and the model network's
-        title says so. Contacts with no score are kept. Off by default;
-        see filter_contacts_by_score().
+        title says so. min_score='suggested' uses the suggested cutoff for
+        the model's predictor (0.3 Boltz, 0.2 AlphaFold3). Contacts with
+        no score are kept. Off by default; see filter_contacts_by_score().
 
     Returns
     -------
@@ -2058,8 +2061,9 @@ def render_figure2_panels_static(PDB_ID, protein_structure_dir, bp_293t_df, bp_h
         given, direct contacts whose filter_score (default 'ipsae_calc',
         computed here from the PAE if interface_confidence is not passed)
         is below it are not drawn, in any panel, and the model network's
-        title says so. Contacts with no score are kept. Off by default;
-        see filter_contacts_by_score().
+        title says so. min_score='suggested' uses the suggested cutoff for
+        the model's predictor (0.3 Boltz, 0.2 AlphaFold3). Contacts with
+        no score are kept. Off by default; see filter_contacts_by_score().
 
     Returns
     -------
