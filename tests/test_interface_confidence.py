@@ -200,6 +200,24 @@ def test_experimental_structure_has_none():
     assert read_interface_confidence(pdb) is None
 
 
+def test_structure_without_contacts_is_counted():
+    # a model in which no two proteins touch has an empty contact table; it must
+    # still count in the denominator of the summary, and not break it
+    import pandas as pd
+
+    from bioplexpy.cli import summarize_contacts
+    columns = ['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
+               'bioplex_293T', 'bioplex_HCT116']
+    empty = pd.DataFrame([], columns=columns)
+    assert len(empty[empty.structure_contact.astype(bool)].columns) == len(columns)
+    one = pd.DataFrame([['P1', 'P2', 'A', 'B', True, False, False]], columns=columns)
+    summary = summarize_contacts({'m0': one, 'm1': one, 'm2': empty, 'm3': empty}, None, None)
+    assert summary.n_structures_contact.tolist() == [2]
+    assert summary.fraction_structures_contact.tolist() == [0.5]
+    nothing = summarize_contacts({'m0': empty, 'm1': empty}, None, None)
+    assert len(nothing) == 0 and 'fraction_structures_contact' in nothing
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):
