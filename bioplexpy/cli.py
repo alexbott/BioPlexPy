@@ -201,7 +201,9 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                         dpi=args.dpi, bbox_inches='tight')
             plt.close(fig)
 
-    contacts = contacts_df[contacts_df.structure_contact]
+    # .astype(bool): a table with no rows has an untyped structure_contact
+    # column, and indexing with it would select columns, not rows
+    contacts = contacts_df[contacts_df.structure_contact.astype(bool)]
     n_unmapped = (len(map_report) - int(map_report.accepted.sum())
                   if 'accepted' in map_report else 0)
     summary = (f'{len(file_chain_map)} chains mapped'
@@ -286,7 +288,11 @@ def summarize_contacts(contacts_by_name, bp_293t_df, bp_hct116_df, reference=Non
                              bioplex_HCT116=key in edges_hct116)
 
     names = list(contacts_by_name)
-    summary = pd.DataFrame(list(rows.values()))
+    # the columns are named so that a table with no rows (no structure has
+    # a contact or a BioPlex interaction) still has them
+    summary = pd.DataFrame(list(rows.values())) if rows else pd.DataFrame(
+        columns=['UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'bioplex_293T',
+                 'bioplex_HCT116'])
     for name in names:
         # pairs missing from a structure's table are not contacts there
         summary[name] = summary[name].eq(True) if name in summary else False
