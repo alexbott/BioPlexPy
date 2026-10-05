@@ -188,9 +188,10 @@ Open `results/viewer/index.html` in a browser. It shows:
 
 The two sliders hide contacts found in fewer than a number of models, or scoring below a cutoff;
 they change what is drawn, not what was measured. What counts as a contact is stated at the top of
-the page: it opens with the rule the tables were made with (the command line's), and a button
-switches to the other preset (the BioPlex 3.0 paper's any two atoms within 6 A, or BioPlex3D's),
-for which the contacts are worked out when the page is written.
+the page (hover over a rule's button to read it): it opens with the rule the tables were made
+with (the command line's), and a button switches to the other preset (the BioPlex 3.0 paper's any
+two atoms within 6 A, or BioPlex3D's), for which the contacts are worked out when the page is
+written.
 
 The page is a folder of plain files that needs no server. It loads Mol\* from the web
 (cdn.jsdelivr.net), so the structure panel needs a connection; the rest works without one. Each

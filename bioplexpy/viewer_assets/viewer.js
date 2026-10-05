@@ -487,13 +487,15 @@ function setup() {
   $('settings').textContent = N + ' model' + (N === 1 ? '' : 's') + ' of one prediction' + (job.tool ? ' (' + ({boltz: 'Boltz', af3: 'AlphaFold3', colabfold: 'ColabFold'}[job.tool] || job.tool) + ')' : '') + '.';
   const ruleText = c => (c.contact_atoms === 'ca' ? 'C\u03b1 atoms' : 'any two atoms') + ' closer than ' + c.distance + ' \u00c5'
     + (c.min_plddt != null ? ', pLDDT at least ' + c.min_plddt : '') + (c.max_pae != null ? ', PAE at most ' + c.max_pae + ' \u00c5' : '');
-  job.rules.forEach((r, i) => { const label = document.createElement('label');
-    label.innerHTML = '<input type="radio" name="rule" value="' + i + '"' + (i ? '' : ' checked') + '> ';
-    label.appendChild(document.createTextNode(r.label + ': ' + ruleText(r.contact)));
-    label.querySelector('input').addEventListener('change', () => { useRule(i);
+  // one button per rule, like the model buttons; the rule itself is in the button's tooltip
+  job.rules.forEach((r, i) => { const b = document.createElement('button');
+    b.textContent = r.label; b.title = 'A contact: ' + ruleText(r.contact); b.classList.toggle('on', i === 0);
+    b.addEventListener('click', () => { useRule(i);
+      document.querySelectorAll('#rules button').forEach((x, j) => x.classList.toggle('on', j === i));
       Mol.select(state.model, interfaceOf(BPV.models[state.model], state.sel).residues, false);
       drawNets(); drawPaeOverlay(); drawTable(); selectionNote(); });
-    $('rules').appendChild(label); });
+    $('rules').appendChild(b); });
+  if (job.rules.length === 1) $('rules').closest('.group').style.display = 'none';
   job.models.forEach((m, i) => { const b = document.createElement('button'); b.textContent = i; b.title = modelText(i);
     b.addEventListener('click', () => showModel(i)); $('models').appendChild(b); });
   const k = $('min-k'); k.max = N; k.value = state.minK;

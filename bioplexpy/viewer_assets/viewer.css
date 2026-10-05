@@ -10,11 +10,9 @@ h2 span { font-weight: 400; color: var(--muted); }
             background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
 .group { display: inline-flex; align-items: center; gap: 6px; }
 .label { font-weight: 600; }
-.group.wide { flex-basis: 100%; }
-#rules { display: inline-flex; flex-wrap: wrap; gap: 2px 18px; }
-#models button { min-width: 30px; padding: 3px 6px; margin-right: 2px; border: 1px solid var(--line);
+#models button, #rules button { min-width: 30px; padding: 3px 6px; margin-right: 2px; border: 1px solid var(--line);
                  background: #fff; border-radius: 4px; cursor: pointer; font: inherit; }
-#models button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+#models button.on, #rules button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 main { display: grid; gap: 12px; margin-top: 12px;
        grid-template-columns: minmax(360px, 1.25fr) repeat(3, minmax(220px, 1fr)); }
 section { border: 1px solid var(--line); border-radius: 6px; padding: 8px; min-width: 0; }
