@@ -231,9 +231,9 @@ def _write_js(path, target, data):
         out.write(';\n')
 
 
-def build_viewer_data(structure_files, names, contacts_by_name, summary, contact,
-                      chain_to_uniprot, bp_293t_df, bp_hct116_df, min_score=None,
-                      filter_score='ipsae_calc', filter_reduce='max', title=None):
+def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_df,
+                      bp_hct116_df, min_score=None, filter_score='ipsae_calc',
+                      filter_reduce='max', title=None):
     '''
     Everything the page shows, for the models of one job.
 
@@ -243,9 +243,11 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
         The job's model files, best-ranked first; the first is the
         reference the others are superposed on.
     names: dict, structure file -> name (as in the per-model tables)
-    contacts_by_name: dict, name -> table from compare_structure_contacts_to_BioPlex()
-    summary: table from summarize_contacts() over the same names
-    contact: dict from resolve_contact_settings()
+    rules: list of dict, one per contact rule the page can switch between,
+        the first being the one it opens with. Each has: id, label, contact
+        (dict from resolve_contact_settings()), tables (name -> table from
+        compare_structure_contacts_to_BioPlex() under that rule) and
+        summary (summarize_contacts() of those tables).
     chain_to_uniprot: dict, chain ID -> UniProt ID(s); the same for every model
     bp_293t_df, bp_hct116_df: BioPlex tables
     min_score, filter_score, filter_reduce: the score filter in use, if any
@@ -266,6 +268,7 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
                                                _write_rotated_structure)
 
     reference_file = structure_files[0]
+    contact = rules[0]['contact']
     # chain map with the stand-in IDs for nucleic acid and unmapped chains,
     # colours, labels and the reference's display orientation: exactly what
     # the static figure uses
@@ -297,14 +300,20 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
                 warnings.warn(f'PAE for {structure_file} not shown: {e}')
             if pae_data is not None:
                 tools.add(pae_data['tool'])
-            rule_pae = pae_data if (contact['contact_atoms'] == 'ca'
-                                    and (contact['min_plddt'] is not None
-                                         or contact['max_pae'] is not None)) else None
-            chain_pairs = _direct_interaction_chain_pairs(
-                model, contact['distance'], min_plddt=contact['min_plddt'],
-                contact_atoms=contact['contact_atoms'], max_pae=contact['max_pae'],
-                pae_data=rule_pae)
-            interfaces = interface_residues(model, chain_pairs, contact, rule_pae)
+            interfaces, edges = {}, {}
+            for rule in rules:
+                settings = rule['contact']
+                rule_pae = pae_data if (settings['contact_atoms'] == 'ca'
+                                        and (settings['min_plddt'] is not None
+                                             or settings['max_pae'] is not None)) else None
+                chain_pairs = _direct_interaction_chain_pairs(
+                    model, settings['distance'], min_plddt=settings['min_plddt'],
+                    contact_atoms=settings['contact_atoms'], max_pae=settings['max_pae'],
+                    pae_data=rule_pae)
+                interfaces[rule['id']] = interface_residues(model, chain_pairs, settings,
+                                                            rule_pae)
+                # every contact, nucleic acid and unmapped chains included
+                edges[rule['id']] = PDB_chains_to_uniprot(chain_pairs, chain_ids_map)
 
             rotation, center, rmsd = common_frame(model, reference_ca,
                                                   figure['structure_rotation'],
@@ -347,32 +356,36 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
                 'rmsd_to_first': round(rmsd, 2),
                 'centroids': {node: np.round(point, 2)
                               for node, point in zip(node_ids, node_points)},
-                # every contact, nucleic acid and unmapped chains included
-                'edges': PDB_chains_to_uniprot(chain_pairs, chain_ids_map),
+                'edges': edges,
             })
 
     names_in_order = [names[f] for f in structure_files]
     base = {'UniprotA', 'UniprotB', 'SymbolA', 'SymbolB', 'structure_contact',
             'passes_filter', 'bioplex_293T', 'bioplex_HCT116'}
     score_names = []
-    for table in contacts_by_name.values():
-        score_names += [c[:-3] for c in table.columns
-                        if c not in base and c.endswith('_AB') and c[:-3] not in score_names]
-    filtered = 'n_structures_pass' in summary
-    pairs = []
-    for row in summary.to_dict('records'):
-        pair = {'a': row['UniprotA'], 'b': row['UniprotB'],
-                'n_contact': row['n_structures_contact'],
-                'bp293': bool(row['bioplex_293T']), 'bpHct': bool(row['bioplex_HCT116']),
-                'contact': [bool(row[name]) for name in names_in_order],
-                'scores': {score: [[row.get(f'{name}:{score}_AB'), row.get(f'{name}:{score}_BA')]
-                                   for name in names_in_order] for score in score_names}}
-        if filtered:
-            pair['n_pass'] = row['n_structures_pass']
-            pair['pass'] = [bool(row[f'{name}:pass']) for name in names_in_order]
-        if 'reference_contact' in row:
-            pair['reference'] = bool(row['reference_contact'])
-        pairs.append(pair)
+    for rule in rules:
+        for table in rule['tables'].values():
+            score_names += [c[:-3] for c in table.columns if c not in base
+                            and c.endswith('_AB') and c[:-3] not in score_names]
+
+    def pairs_of(summary):
+        filtered = 'n_structures_pass' in summary
+        pairs = []
+        for row in summary.to_dict('records'):
+            pair = {'a': row['UniprotA'], 'b': row['UniprotB'],
+                    'n_contact': row['n_structures_contact'],
+                    'bp293': bool(row['bioplex_293T']), 'bpHct': bool(row['bioplex_HCT116']),
+                    'contact': [bool(row[name]) for name in names_in_order],
+                    'scores': {score: [[row.get(f'{name}:{score}_AB'),
+                                        row.get(f'{name}:{score}_BA')]
+                                       for name in names_in_order] for score in score_names}}
+            if filtered:
+                pair['n_pass'] = row['n_structures_pass']
+                pair['pass'] = [bool(row[f'{name}:pass']) for name in names_in_order]
+            if 'reference_contact' in row:
+                pair['reference'] = bool(row['reference_contact'])
+            pairs.append(pair)
+        return pairs
 
     protein_ids = [id_i for id_i in figure['all_ids'] if figure['id_type'][id_i] == 'protein']
     edges_293t, baits_293t, preys_293t = _bioplex_edges_and_roles(bp_293t_df)
@@ -391,7 +404,8 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
     job = {
         'title': title or _job_title(names_in_order),
         'tool': sorted(tools)[0] if len(tools) == 1 else None,
-        'contact': contact,
+        'rules': [{'id': rule['id'], 'label': rule['label'], 'contact': rule['contact'],
+                   'pairs': pairs_of(rule['summary'])} for rule in rules],
         'filter': {'min_score': min_score, 'score': filter_score, 'reduce': filter_reduce,
                    # where the page's cutoff slider starts when no --min-score was given
                    'suggested': SUGGESTED_MIN_SCORE.get(sorted(tools)[0]) if len(tools) == 1 else None},
@@ -402,20 +416,46 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
                     'length': len(models[0]['residues'].get(chain, []))}
                    for chain in chain_types],
         'nodes': nodes,
-        'pairs': pairs,
         'bioplex_edges': bioplex_edges,
-        'has_reference': 'reference_contact' in summary,
+        'has_reference': 'reference_contact' in rules[0]['summary'],
         'models': model_summaries,
     }
     return job, models
 
 
+# the contact rules the page offers besides the command line's: the presets, by name
+RULE_LABELS = {'bioplex3d': 'BioPlex3D', 'bioplex2021': 'BioPlex 3.0 paper'}
+
+
+def contact_rules(contact):
+    """
+    The contact rules the page can switch between: the one in use (first),
+    then every preset of resolve_contact_settings() that differs from it.
+    Returns a list of dict: id, label, contact.
+    """
+    from bioplexpy.analysis_funcs import CONTACT_PRESETS, resolve_contact_settings
+
+    presets = {name: resolve_contact_settings(name) for name in CONTACT_PRESETS}
+    same = [name for name, settings in presets.items() if settings == contact]
+    rules = [{'id': same[0] if same else 'command_line',
+              'label': RULE_LABELS.get(same[0], same[0]) if same else 'Command line',
+              'contact': contact}]
+    rules += [{'id': name, 'label': RULE_LABELS.get(name, name), 'contact': settings}
+              for name, settings in presets.items() if name not in same]
+    return rules
+
+
 def write_viewer(structure_files, names, contacts_by_name, args, chain_to_uniprot,
-                 bp_293t_df, bp_hct116_df, out_dir, reference=None, title=None):
-    '''
+                 bp_293t_df, bp_hct116_df, out_dir, reference=None, title=None,
+                 reference_for_rule=None):
+    """
     Write the viewer folder for the models of one job (see the module
     docstring). Called by `bioplexpy-structure --viewer` after the
     per-model tables are made.
+
+    The page opens with the contact rule the tables were made with, and can
+    switch to the other preset(s) (see contact_rules()); the contacts under
+    those are worked out here, with the same functions.
 
     Parameters
     ----------
@@ -426,21 +466,48 @@ def write_viewer(structure_files, names, contacts_by_name, args, chain_to_unipro
     chain_to_uniprot: dict, chain ID -> UniProt ID(s), the same for every model
     bp_293t_df, bp_hct116_df: BioPlex tables
     out_dir: str; the page goes to <out_dir>/viewer/
-    reference: set of frozenset pairs (optional), an experimental structure's contacts
+    reference: set of frozenset pairs (optional), an experimental structure's
+        contacts under the rule in use
     title: str (optional)
+    reference_for_rule: function (optional), contact settings -> set of
+        frozenset pairs: the experimental structure's contacts under another rule
 
     Returns
     -------
     str: path of index.html
-    '''
-    from bioplexpy.analysis_funcs import (_read_interface_confidence_or_warn,
+    """
+    from bioplexpy.analysis_funcs import (PDB_to_interacting_chains_uniprot_maps,
+                                          _read_interface_confidence_or_warn,
+                                          compare_structure_contacts_to_BioPlex,
                                           resolve_min_score)
     from bioplexpy.cli import summarize_contacts
 
     contact = {'contact_atoms': args.contact_atoms, 'distance': args.distance,
                'min_plddt': args.min_plddt, 'max_pae': args.max_pae}
-    tables = {names[f]: contacts_by_name[names[f]] for f in structure_files}
-    summary = summarize_contacts(tables, bp_293t_df, bp_hct116_df, reference)
+    rules = contact_rules(contact)
+    rules[0]['tables'] = {names[f]: contacts_by_name[names[f]] for f in structure_files}
+    rules[0]['summary'] = summarize_contacts(rules[0]['tables'], bp_293t_df, bp_hct116_df,
+                                             reference)
+    # the scores do not depend on the contact rule: read (or compute) them once per model
+    confidence = {}
+    for rule in rules[1:]:
+        settings, rule['tables'] = rule['contact'], {}
+        for structure_file in structure_files:
+            maps = PDB_to_interacting_chains_uniprot_maps(
+                structure_file, None, settings['distance'], chain_to_uniprot=chain_to_uniprot,
+                min_plddt=settings['min_plddt'], contact_atoms=settings['contact_atoms'],
+                max_pae=settings['max_pae'])
+            if structure_file not in confidence:
+                confidence[structure_file] = _read_interface_confidence_or_warn(
+                    structure_file, chain_ids=list(maps[2]),
+                    compute_scores=args.compute_scores)
+            rule['tables'][names[structure_file]] = compare_structure_contacts_to_BioPlex(
+                *maps, bp_293t_df, bp_hct116_df,
+                interface_confidence=confidence[structure_file])
+        rule_reference = (reference_for_rule(settings)
+                          if reference is not None and reference_for_rule else None)
+        rule['summary'] = summarize_contacts(rule['tables'], bp_293t_df, bp_hct116_df,
+                                             rule_reference)
     min_score = None
     if args.min_score is not None:
         # 'suggested' depends on the predictor, which the first model's scores name
@@ -449,8 +516,8 @@ def write_viewer(structure_files, names, contacts_by_name, args, chain_to_unipro
             _read_interface_confidence_or_warn(structure_files[0], compute_scores=False),
             args.filter_score)
     job, models = build_viewer_data(
-        structure_files, names, tables, summary, contact, chain_to_uniprot,
-        bp_293t_df, bp_hct116_df, min_score=min_score, filter_score=args.filter_score,
+        structure_files, names, rules, chain_to_uniprot, bp_293t_df, bp_hct116_df,
+        min_score=min_score, filter_score=args.filter_score,
         filter_reduce=args.filter_reduce, title=title)
 
     viewer_dir = os.path.join(out_dir, 'viewer')

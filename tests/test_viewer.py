@@ -26,8 +26,8 @@ from bioplexpy.analysis_funcs import (_ca_interface, _direct_interaction_chain_p
                                       resolve_contact_settings)
 from bioplexpy.cli import _resolve_filter_args, build_parser, summarize_contacts
 from bioplexpy.viewer import (ASSET_FILES, PAE_STEP, _protein_ca, build_viewer_data,
-                              interface_residues, kabsch, pack_pae, unpack_pae,
-                              write_viewer)
+                              contact_rules, interface_residues, kabsch, pack_pae,
+                              unpack_pae, write_viewer)
 
 HERE = os.path.dirname(__file__)
 FOLDS = os.environ.get('BIOPLEXPY_FOLD_OUTPUTS', os.path.join(HERE, '..', '..', 'fold_outputs'))
@@ -66,7 +66,7 @@ BP_293T = _bioplex([('P61158', 'P61160'), ('O15144', 'P61158')])
 BP_HCT116 = _bioplex([('P61158', 'P61160')])
 
 
-def _arp23(n_models=3):
+def _arp23(n_models=3, preset='bioplex3d'):
     _need(ARP23_BOLTZ)
     files = sorted(glob.glob(os.path.join(ARP23_BOLTZ, '*', 'predictions', '*',
                                           '*_model_?.cif')))[:n_models]
@@ -74,16 +74,18 @@ def _arp23(n_models=3):
     tables = {}
     for f in files:
         maps = PDB_to_interacting_chains_uniprot_maps(f, None, chain_to_uniprot=ARP23_CHAINS,
-                                                      contact_preset='bioplex3d')
+                                                      contact_preset=preset)
         tables[names[f]] = compare_structure_contacts_to_BioPlex(*maps, BP_293T, BP_HCT116)
     return files, names, tables
 
 
 def _built(n_models=3):
+    # the page's data under one contact rule (BioPlex3D's, the default)
     files, names, tables = _arp23(n_models)
     summary = summarize_contacts(tables, BP_293T, BP_HCT116)
-    job, models = build_viewer_data(files, names, tables, summary, CONTACT, ARP23_CHAINS,
-                                    BP_293T, BP_HCT116)
+    rules = [dict(id='bioplex3d', label='BioPlex3D', contact=CONTACT, tables=tables,
+                  summary=summary)]
+    job, models = build_viewer_data(files, names, rules, ARP23_CHAINS, BP_293T, BP_HCT116)
     return files, names, summary, job, models
 
 
@@ -176,7 +178,7 @@ def test_page_numbers_equal_the_tables():
     files, names, summary, job, models = _built()
     order = [names[f] for f in files]
     assert [m['name'] for m in job['models']] == order
-    by_pair = {frozenset((p['a'], p['b'])): p for p in job['pairs']}
+    by_pair = {frozenset((p['a'], p['b'])): p for p in job['rules'][0]['pairs']}
     assert len(by_pair) == len(summary)
     for row in summary.to_dict('records'):
         pair = by_pair[frozenset((row['UniprotA'], row['UniprotB']))]
@@ -186,7 +188,7 @@ def test_page_numbers_equal_the_tables():
         assert pair['bpHct'] == bool(row['bioplex_HCT116'])
     # the edges the network panel draws are the same contacts, model by model
     for index, model in enumerate(job['models']):
-        drawn = {frozenset(edge) for edge in model['edges']}
+        drawn = {frozenset(edge) for edge in model['edges']['bioplex3d']}
         assert drawn == {pair for pair, p in by_pair.items() if p['contact'][index]}
     assert {frozenset((e['a'], e['b'])) for e in job['bioplex_edges']} == {
         frozenset(('P61158', 'P61160')), frozenset(('O15144', 'P61158'))}
@@ -218,11 +220,46 @@ def test_viewer_folder_is_written():
 
         job = data('job.js', 'job')
         assert job['title'] == 'arp23' and len(job['models']) == 2
-        assert job['contact'] == {'contact_atoms': 'ca', 'distance': 8, 'min_plddt': 50,
-                                  'max_pae': 10}
+        # the rule the tables were made with first, then the other preset
+        assert [r['id'] for r in job['rules']] == ['bioplex3d', 'bioplex2021']
+        assert job['rules'][0]['contact'] == {'contact_atoms': 'ca', 'distance': 8,
+                                              'min_plddt': 50, 'max_pae': 10}
         model = data('model_1.js', 'models[1]')
         assert model['format'] == 'cif' and model['structure'].startswith('data_')
-        assert model['interfaces'] and model['pae']['n'] == model['pae_rows']
+        assert model['interfaces']['bioplex3d'] and model['pae']['n'] == model['pae_rows']
+
+        # the other rule's numbers are what the tables give under that rule
+        other_tables = _arp23(2, preset='bioplex2021')[2]
+        other = summarize_contacts(other_tables, BP_293T, BP_HCT116)
+        order = [names[f] for f in files]
+        pairs = {frozenset((p['a'], p['b'])): p for p in job['rules'][1]['pairs']}
+        assert len(pairs) == len(other)
+        for row in other.to_dict('records'):
+            pair = pairs[frozenset((row['UniprotA'], row['UniprotB']))]
+            assert pair['contact'] == [bool(row[name]) for name in order]
+        for index in (0, 1):
+            drawn = {frozenset(e) for e in job['models'][index]['edges']['bioplex2021']}
+            assert drawn == {k for k, p in pairs.items() if p['contact'][index]}
+            made_by = {frozenset(ARP23_CHAINS[c] for c in i['chains'])
+                       for i in data(f'model_{index}.js', f'models[{index}]')
+                       ['interfaces']['bioplex2021']}
+            assert made_by == drawn
+        # any atom within 6 A reaches further than CA atoms within 8 A with the
+        # confidence conditions: the rules must not give the same contacts here
+        assert sum(p['n_contact'] for p in pairs.values()) > sum(
+            p['n_contact'] for p in job['rules'][0]['pairs'])
+
+
+def test_contact_rules_offered():
+    # the rule in use comes first; a setting that is no preset is offered with both presets
+    assert [r['id'] for r in contact_rules(resolve_contact_settings('bioplex3d'))] \
+        == ['bioplex3d', 'bioplex2021']
+    assert [r['id'] for r in contact_rules(resolve_contact_settings('bioplex2021'))] \
+        == ['bioplex2021', 'bioplex3d']
+    custom = resolve_contact_settings('bioplex3d', distance=10)
+    rules = contact_rules(custom)
+    assert [r['id'] for r in rules] == ['command_line', 'bioplex3d', 'bioplex2021']
+    assert rules[0]['contact'] == custom
 
 
 if __name__ == '__main__':

@@ -616,8 +616,17 @@ def _write_viewer(structure_files, names, contacts_by_name, args, chain_map, uni
         chain_map, _ = map_chains_to_uniprot(files[0], uniprots,
                                              min_identity=args.min_identity,
                                              min_coverage=args.min_coverage)
+
+    # the page can switch to the other contact preset(s): the reference
+    # structure's contacts are then needed under those rules too
+    def reference_for_rule(settings):
+        return reference_contacts(args.reference,
+                                  argparse.Namespace(**{**vars(args), **settings}),
+                                  chain_map, uniprots)
+
     return write_viewer(files, names, contacts_by_name, args, chain_map, bp_293t_df,
-                        bp_hct116_df, args.out_dir, reference=reference)
+                        bp_hct116_df, args.out_dir, reference=reference,
+                        reference_for_rule=reference_for_rule)
 
 
 def _run(parser, args, chain_map, uniprots, zip_extract_root):

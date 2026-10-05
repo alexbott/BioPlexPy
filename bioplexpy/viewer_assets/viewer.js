@@ -14,7 +14,8 @@ const N = job.models.length;
 const nodeById = Object.fromEntries(job.nodes.map(n => [n.id, n]));
 const chainById = Object.fromEntries(job.chains.map(c => [c.id, c]));
 const key = (a, b) => a < b ? a + '|' + b : b + '|' + a;
-const pairByKey = Object.fromEntries(job.pairs.map(p => [key(p.a, p.b), p]));
+// the contact rule in use: job.rules[state.rule] (pairs), and its contacts in every model
+let rule = job.rules[0], pairByKey = {};
 const SCORE_LABELS = {ipsae_calc: 'ipSAE', pair_iptm: 'pair ipTM', ipsae: 'ipSAE (ColabFold)',
   pdockq_calc: 'pDockQ', pdockq2_calc: 'pDockQ2', pdockq: 'pDockQ (ColabFold)',
   pdockq2: 'pDockQ2 (ColabFold)', lis: 'LIS', clis: 'cLIS', ilis: 'iLIS'};
@@ -22,7 +23,7 @@ const SCORE_LABELS = {ipsae_calc: 'ipSAE', pair_iptm: 'pair ipTM', ipsae: 'ipSAE
 const scoreName = job.score_names.includes(job.filter.score) ? job.filter.score
   : (job.score_names.includes('pair_iptm') ? 'pair_iptm' : job.score_names[0]);
 const state = {
-  model: 0, colour: 'chain', minK: 1,
+  model: 0, rule: 0, colour: 'chain', minK: 1,
   scoreOn: job.filter.min_score != null && scoreName === job.filter.score,
   cut: job.filter.min_score != null ? job.filter.min_score : (job.filter.suggested != null ? job.filter.suggested : 0.3),
   sel: null,          // {a, b}: the selected protein pair
@@ -33,12 +34,18 @@ const state = {
 
 /* ---------- contacts across models ---------- */
 // every contact seen in any model, protein or not: key -> {a, b, contact: [per model]}
-const edges = {};
-job.models.forEach((m, i) => m.edges.forEach(([a, b]) => {
-  const e = edges[key(a, b)] = edges[key(a, b)] || {a: a < b ? a : b, b: a < b ? b : a,
-    contact: new Array(N).fill(false)};
-  e.contact[i] = true;
-}));
+let edges = {};
+function useRule(index) {
+  state.rule = index; rule = job.rules[index];
+  pairByKey = Object.fromEntries(rule.pairs.map(p => [key(p.a, p.b), p]));
+  edges = {};
+  job.models.forEach((m, i) => m.edges[rule.id].forEach(([a, b]) => {
+    const e = edges[key(a, b)] = edges[key(a, b)] || {a: a < b ? a : b, b: a < b ? b : a,
+      contact: new Array(N).fill(false)};
+    e.contact[i] = true;
+  }));
+}
+useRule(0);
 function pairScore(pair, m) {
   const s = pair && scoreName && pair.scores[scoreName];
   if (!s) return null;
@@ -106,7 +113,12 @@ const Mol = {
       volumeStreamingDisabled: true});
     const plugin = this.plugin = viewer.plugin;
     this.S = molstar.lib.structure;
-    plugin.canvas3d.setProps({camera: {mode: 'orthographic', manualReset: true}});
+    // Mol*'s "illustrative" look: outlines and ambient occlusion on the canvas, and (in load())
+    // representations that ignore the light
+    plugin.canvas3d.setProps({camera: {mode: 'orthographic', manualReset: true},
+      postprocessing: {outline: {name: 'on', params: {scale: 1, color: 0x000000, threshold: 0.33, includeTransparent: true}},
+                       occlusion: {name: 'on', params: Object.assign({}, (plugin.canvas3d.props.postprocessing.occlusion.params || {}),
+                         {samples: 32, radius: 5, bias: 0.8, blurKernelSize: 15})}}});
     const hex = Object.fromEntries(job.chains.map(c => [c.id, parseInt(c.color.slice(1), 16)]));
     this.addTheme('bpv-chain', (chain) => hex[chain] != null ? hex[chain] : GREY);
     const camera = plugin.canvas3d.camera;
@@ -140,7 +152,16 @@ const Mol = {
     if (this.structures[i]) return;
     const H = this.plugin.managers.structure.hierarchy;
     const before = new Set(H.current.structures.map(s => s.cell.transform.ref));
-    await this.viewer.loadStructureFromData(m.structure, m.format === 'cif' ? 'mmcif' : 'pdb', {dataLabel: m.name});
+    // cartoon for the chains whatever the size of the complex (Mol*'s own preset changes with
+    // size), ball-and-stick for ligands and ions
+    const B = this.plugin.builders;
+    const data = await B.data.rawData({data: m.structure, label: m.name});
+    const trajectory = await B.structure.parseTrajectory(data, m.format === 'cif' ? 'mmcif' : 'pdb');
+    const structure = await B.structure.createStructure(await B.structure.createModel(trajectory));
+    for (const [part, type] of [['polymer', 'cartoon'], ['ligand', 'ball-and-stick'], ['ion', 'ball-and-stick']]) {
+      const component = await B.structure.tryCreateComponentStatic(structure, part);
+      if (component) await B.structure.representation.addRepresentation(component, {type, typeParams: {ignoreLight: true}, color: 'bpv-chain'});
+    }
     this.structures[i] = H.current.structures.find(s => !before.has(s.cell.transform.ref));
     this.addTheme('bpv-plddt-' + i, (chain, resi) => {
       const v = m.plddtOf[chain] && m.plddtOf[chain][resi];
@@ -324,7 +345,7 @@ function interfaceOf(m, sel) {
   // the residues of the selected pair's interface(s) in model m, and the chain pairs involved
   const residues = [], chainPairs = [];
   if (!m || !sel) return {residues, chainPairs};
-  m.interfaces.forEach(f => {
+  m.interfaces[rule.id].forEach(f => {
     const [ci, cj] = f.chains, ia = chainById[ci].ids, ib = chainById[cj].ids;
     if ((ia.includes(sel.a) && ib.includes(sel.b)) || (ia.includes(sel.b) && ib.includes(sel.a))) {
       residues.push({chain: ci, resi: f.residues[0]}, {chain: cj, resi: f.residues[1]});
@@ -426,9 +447,9 @@ function drawTable() {
     ['293T', 'HCT116'], job.has_reference ? ['Reference'] : []);
   document.querySelector('#pairs thead').innerHTML = '<tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr>';
   const body = document.querySelector('#pairs tbody'); body.textContent = '';
-  if (!job.pairs.length) { body.innerHTML = '<tr><td colspan="' + head.length + '">No pair of these proteins is a contact in a model or an interaction in BioPlex.</td></tr>'; return; }
+  if (!rule.pairs.length) { body.innerHTML = '<tr><td colspan="' + head.length + '">No pair of these proteins is a contact in a model or an interaction in BioPlex.</td></tr>'; return; }
   const yes = v => v ? 'yes' : '–';
-  job.pairs.map(p => ({p, k: key(p.a, p.b)})).map(x => Object.assign(x, {n: count(x.k)}))
+  rule.pairs.map(p => ({p, k: key(p.a, p.b)})).map(x => Object.assign(x, {n: count(x.k)}))
     .sort((x, y) => y.n - x.n).forEach(({p, k, n}) => {
       const tr = document.createElement('tr'), v = pairScore(p, state.model);
       const cells = [nodeById[p.a].label + ' – ' + nodeById[p.b].label, countText(k), yes(inModel(k, state.model))]
@@ -463,11 +484,16 @@ async function showModel(i) {
 function setup() {
   $('title').textContent = job.title;
   document.title = job.title + ' – BioPlexPy';
-  const c = job.contact;
-  $('settings').textContent = N + ' model' + (N === 1 ? '' : 's') + '. A contact: '
-    + (c.contact_atoms === 'ca' ? 'Cα atoms' : 'any two atoms') + ' closer than ' + c.distance + ' Å'
-    + (c.min_plddt != null ? ', pLDDT at least ' + c.min_plddt : '') + (c.max_pae != null ? ', PAE at most ' + c.max_pae + ' Å' : '')
-    + ' (set on the command line).';
+  $('settings').textContent = N + ' model' + (N === 1 ? '' : 's') + ' of one prediction' + (job.tool ? ' (' + ({boltz: 'Boltz', af3: 'AlphaFold3', colabfold: 'ColabFold'}[job.tool] || job.tool) + ')' : '') + '.';
+  const ruleText = c => (c.contact_atoms === 'ca' ? 'C\u03b1 atoms' : 'any two atoms') + ' closer than ' + c.distance + ' \u00c5'
+    + (c.min_plddt != null ? ', pLDDT at least ' + c.min_plddt : '') + (c.max_pae != null ? ', PAE at most ' + c.max_pae + ' \u00c5' : '');
+  job.rules.forEach((r, i) => { const label = document.createElement('label');
+    label.innerHTML = '<input type="radio" name="rule" value="' + i + '"' + (i ? '' : ' checked') + '> ';
+    label.appendChild(document.createTextNode(r.label + ': ' + ruleText(r.contact)));
+    label.querySelector('input').addEventListener('change', () => { useRule(i);
+      Mol.select(state.model, interfaceOf(BPV.models[state.model], state.sel).residues, false);
+      drawNets(); drawPaeOverlay(); drawTable(); selectionNote(); });
+    $('rules').appendChild(label); });
   job.models.forEach((m, i) => { const b = document.createElement('button'); b.textContent = i; b.title = modelText(i);
     b.addEventListener('click', () => showModel(i)); $('models').appendChild(b); });
   const k = $('min-k'); k.max = N; k.value = state.minK;

@@ -175,7 +175,8 @@ bioplexpy-structure boltz_results_run/ --uniprots P61158 P61160 Q92747 O15144 O1
 
 Open `results/viewer/index.html` in a browser. It shows:
 
-* the structure in [Mol\*](https://molstar.org), coloured by chain or by pLDDT, with a button per
+* the structure in [Mol\*](https://molstar.org), as a cartoon in Mol\*'s illustrative style,
+  coloured by chain or by pLDDT, with a button per
   model (the models are superposed on the first one, so the view holds still when you switch);
 * the three network panels of the figure, with each protein at the centre of its chain(s): they
   turn as the structure is turned. In the model panel a line's width is the number of models that
@@ -186,8 +187,10 @@ Open `results/viewer/index.html` in a browser. It shows:
   interface residues in the structure and its blocks in the heatmap.
 
 The two sliders hide contacts found in fewer than a number of models, or scoring below a cutoff;
-they change what is drawn, not what was measured. What counts as a contact is set on the command
-line, as for the tables, and stated at the top of the page.
+they change what is drawn, not what was measured. What counts as a contact is stated at the top of
+the page: it opens with the rule the tables were made with (the command line's), and a button
+switches to the other preset (the BioPlex 3.0 paper's any two atoms within 6 A, or BioPlex3D's),
+for which the contacts are worked out when the page is written.
 
 The page is a folder of plain files that needs no server. It loads Mol\* from the web
 (cdn.jsdelivr.net), so the structure panel needs a connection; the rest works without one. Each
