@@ -190,6 +190,7 @@ def test_page_numbers_equal_the_tables():
     files, names, summary, job, models = _built()
     order = [names[f] for f in files]
     assert [m['name'] for m in job['models']] == order
+    assert job['confidence'] is True          # Boltz models with their PAE files
     by_pair = {frozenset((p['a'], p['b'])): p for p in job['rules'][0]['pairs']}
     assert len(by_pair) == len(summary)
     for row in summary.to_dict('records'):

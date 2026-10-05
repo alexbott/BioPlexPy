@@ -431,6 +431,9 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
     job = {
         'title': title or _job_title(names_in_order),
         'tool': sorted(tools)[0] if len(tools) == 1 else None,
+        # False when no structure came with confidence files (an experimental structure,
+        # or a model given without them): the page then has no pLDDT to show
+        'confidence': bool(tools),
         'rules': [{'id': rule['id'], 'label': rule['label'], 'contact': rule['contact'],
                    'pairs': pairs_of(rule['summary'])} for rule in rules],
         'filter': {'min_score': min_score, 'score': filter_score, 'reduce': filter_reduce,

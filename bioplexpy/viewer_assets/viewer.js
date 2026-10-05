@@ -484,7 +484,12 @@ async function showModel(i) {
 function setup() {
   $('title').textContent = job.title;
   document.title = job.title + ' – BioPlexPy';
-  $('settings').textContent = N + ' model' + (N === 1 ? '' : 's') + ' of one prediction' + (job.tool ? ' (' + ({boltz: 'Boltz', af3: 'AlphaFold3', colabfold: 'ColabFold'}[job.tool] || job.tool) + ')' : '') + '.';
+  // structures without confidence files (an experimental structure): no pLDDT to color by,
+  // and the contact rule's pLDDT and PAE conditions were not applied
+  if (!job.confidence) $('color-group').style.display = 'none';
+  $('settings').textContent = !job.confidence
+    ? N + ' structure' + (N === 1 ? '' : 's') + ' without confidence data: contacts are judged on distance alone.'
+    : N + ' model' + (N === 1 ? '' : 's') + ' of one prediction' + (job.tool ? ' (' + ({boltz: 'Boltz', af3: 'AlphaFold3', colabfold: 'ColabFold'}[job.tool] || job.tool) + ')' : '') + '.';
   const ruleText = c => (c.contact_atoms === 'ca' ? 'C\u03b1 atoms' : 'any two atoms') + ' closer than ' + c.distance + ' \u00c5'
     + (c.min_plddt != null ? ', pLDDT at least ' + c.min_plddt : '') + (c.max_pae != null ? ', PAE at most ' + c.max_pae + ' \u00c5' : '');
   // one button per rule, like the model buttons; the rule itself is in the button's tooltip
