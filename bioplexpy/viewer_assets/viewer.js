@@ -216,7 +216,7 @@ const centre = {}, scaleRadius = (() => {
   return worst;
 })();
 function nodeFill(panel, n) {
-  if (n.type !== 'protein') return [panel === 'model' ? '#ffffff' : '#ffffff', 1];
+  if (n.type !== 'protein') return [n.color, 1];   // white or a light grey, as the chain in the structure
   if (panel === 'model') return [n.color, 1];
   if (panel === '293t') return [n.bait293 ? '#15b01a' : n.prey293 ? '#c7fdb5' : '#b2b2b2', 1];
   if (n.bait293 && n.baitHct) return ['#929591', 1];

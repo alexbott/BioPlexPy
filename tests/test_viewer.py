@@ -25,7 +25,7 @@ from bioplexpy.analysis_funcs import (_ca_interface, _direct_interaction_chain_p
                                       PDB_to_interacting_chains_uniprot_maps, read_pae,
                                       resolve_contact_settings)
 from bioplexpy.cli import _resolve_filter_args, build_parser, summarize_contacts
-from bioplexpy.viewer import (ASSET_FILES, PAE_STEP, _protein_ca, build_viewer_data,
+from bioplexpy.viewer import (ASSET_FILES, NUCLEIC_ACID_COLORS, PAE_STEP, _protein_ca, build_viewer_data,
                               contact_rules, interface_residues, kabsch, one_copy_per_protein,
                               pack_pae,
                               unpack_pae, write_viewer)
@@ -206,8 +206,8 @@ def test_page_numbers_equal_the_tables():
     assert {frozenset((e['a'], e['b'])) for e in job['bioplex_edges']} == {
         frozenset(('P61158', 'P61160')), frozenset(('O15144', 'P61158'))}
     assert {c['id']: c['ids'] for c in job['chains']} == {c: [u] for c, u in ARP23_CHAINS.items()}
-    # white is reserved for chains that are not protein
-    assert all(c['color'].lower() != '#ffffff' for c in job['chains'] if c['type'] == 'protein')
+    # white and the light greys are reserved for DNA and RNA chains
+    assert not {c['color'].lower() for c in job['chains']} & set(NUCLEIC_ACID_COLORS)
     # PAE rows: every protein residue has one, and the matrix is the file's
     pae_data = read_pae(files[0])
     assert models[0]['pae_rows'] == pae_data['pae'].shape[0]

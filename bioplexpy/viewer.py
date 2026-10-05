@@ -35,7 +35,9 @@ PAE_STEP = 0.125
 # a larger PAE matrix is block-averaged down to at most this many rows
 MAX_PAE_ROWS = 3000
 
-NON_PROTEIN_COLOR = '#ffffff'
+# DNA and RNA chains, in the order of the file: white first, then light greys (the palette
+# for protein chains has neither); a fourth chain starts again at white
+NUCLEIC_ACID_COLORS = ('#ffffff', '#e4e4e4', '#cacaca')
 # the model-level scores each predictor writes, most informative first
 MODEL_SCORE_KEYS = {
     'boltz': ('confidence_score', 'iptm', 'ptm', 'complex_plddt'),
@@ -416,10 +418,18 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
         return pairs
 
     protein_ids = [id_i for id_i in figure['all_ids'] if figure['id_type'][id_i] == 'protein']
+    # a DNA or RNA chain is white or a light grey in the structure, and so is its node
+    nucleic = [chain for chain in chain_types if chain_types[chain] in ('dna', 'rna')]
+    chain_colors = dict(figure['chain_color_palette'])
+    chain_colors.update({chain: NUCLEIC_ACID_COLORS[i % len(NUCLEIC_ACID_COLORS)]
+                         for i, chain in enumerate(nucleic)})
+    node_colors = dict(figure['node_color_palette'])
+    node_colors.update({id_i: chain_colors[chain] for chain in nucleic
+                        for id_i in chain_ids_map.get(chain, [])})
     edges_293t, baits_293t, preys_293t = _bioplex_edges_and_roles(bp_293t_df)
     edges_hct116, baits_hct116, preys_hct116 = _bioplex_edges_and_roles(bp_hct116_df)
     nodes = [{'id': id_i, 'label': figure['labels'][id_i], 'type': figure['id_type'][id_i],
-              'color': figure['node_color_palette'].get(id_i, '#b3b3b3'),
+              'color': node_colors.get(id_i, '#b3b3b3'),
               'chains': sorted(c for c, ids in chain_ids_map.items() if id_i in ids),
               'bait293': id_i in baits_293t, 'prey293': id_i in preys_293t,
               'baitHct': id_i in baits_hct116, 'preyHct': id_i in preys_hct116}
@@ -442,10 +452,7 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                    'suggested': SUGGESTED_MIN_SCORE.get(sorted(tools)[0]) if len(tools) == 1 else None},
         'score_names': score_names,
         'chains': [{'id': chain, 'type': chain_types[chain],
-                    # white is kept for chains that are not protein, as their nodes in the
-                    # networks are (open, dashed); the palette for proteins has no white
-                    'color': (figure['chain_color_palette'].get(chain, '#b3b3b3')
-                              if chain_types[chain] == 'protein' else NON_PROTEIN_COLOR),
+                    'color': chain_colors.get(chain, '#b3b3b3'),
                     'ids': chain_ids_map.get(chain, []),
                     'length': len(models[0]['residues'].get(chain, []))}
                    for chain in chain_types],
