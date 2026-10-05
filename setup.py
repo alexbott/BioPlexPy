@@ -14,6 +14,7 @@ setup(
    author='Roger Vargas, Ludwig Geistlinger, Tyrone Lee',
    author_email='roger_vargas@g.harvard.edu',
    packages=['bioplexpy'],  #same as name
+   package_data={'bioplexpy': ['viewer_assets/*']},  # the --viewer page
    install_requires=['pandas','requests','anndata','networkx','numpy','matplotlib','biopython','scipy','pypdb','py3Dmol'], #external packages as dependencies
    entry_points={'console_scripts': ['bioplexpy-structure=bioplexpy.cli:main']},
 )

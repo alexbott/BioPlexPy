@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BioPlexPy structure viewer</title>
+<!-- Mol* (MIT), pinned: the page uses calls that are not part of its documented API -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/molstar@5.13.0/build/viewer/molstar.css">
+<link rel="stylesheet" href="viewer.css">
+<script src="https://cdn.jsdelivr.net/npm/molstar@5.13.0/build/viewer/molstar.js"></script>
+<script src="job.js"></script>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <p id="settings"></p>
+  <div id="controls">
+    <span class="group"><span class="label">Model</span><span id="models"></span></span>
+    <span class="group"><span class="label">Colour</span>
+      <label><input type="radio" name="colour" value="chain" checked> chain</label>
+      <label><input type="radio" name="colour" value="plddt"> pLDDT</label></span>
+    <span class="group"><label class="label" for="min-k">Contact in at least</label>
+      <input type="range" id="min-k" min="1" max="1" value="1"><span id="min-k-text"></span></span>
+    <span class="group" id="score-group"><label><input type="checkbox" id="score-on"> <span id="score-name"></span> at least</label>
+      <input type="range" id="score-cut" min="0" max="1" step="0.01" value="0.3"><span id="score-cut-text"></span></span>
+  </div>
+</header>
+<main>
+  <section id="structure-panel">
+    <h2>Structure <span id="model-note"></span></h2>
+    <div id="mol"></div>
+    <p id="mol-message" hidden></p>
+  </section>
+  <section class="net"><h2>Model contacts</h2><canvas id="net-model"></canvas>
+    <p class="legend"><span class="line thick"></span> in every model <span class="line thin"></span> in few
+      <span class="line faint"></span> not in the model shown</p></section>
+  <section class="net"><h2>BioPlex direct interactions (293T)</h2><canvas id="net-293t"></canvas>
+    <p class="legend"><span class="line" style="background:#15b01a"></span> detected <span class="line" style="background:#929591"></span> not detected
+      <span class="dot" style="background:#15b01a"></span> bait <span class="dot" style="background:#c7fdb5"></span> prey only</p></section>
+  <section class="net"><h2>All BioPlex interactions (293T + HCT116)</h2><canvas id="net-all"></canvas>
+    <p class="legend"><span class="line" style="background:#e50000"></span> 293T <span class="line" style="background:#0343df"></span> HCT116
+      <span class="line" style="background:#929591"></span> both; thick: a contact in the models</p></section>
+  <section id="pae-panel">
+    <h2>Predicted aligned error <span id="pae-note"></span></h2>
+    <div id="pae-wrap"><canvas id="pae"></canvas><canvas id="pae-over"></canvas></div>
+    <p class="legend"><span id="pae-scale"></span> 0 to 31.75 &#197;; row: aligned residue, column: scored residue. <span id="pae-hover"></span></p>
+  </section>
+  <section id="table-panel">
+    <h2>Protein pairs</h2>
+    <table id="pairs"><thead></thead><tbody></tbody></table>
+  </section>
+</main>
+<div id="tip" hidden></div>
+<script src="viewer.js"></script>
+</body>
+</html>

@@ -163,6 +163,37 @@ This is information, not a filter. What it meant in the Boltz test above (ten mo
 For Boltz, ten models per prediction (`--diffusion_samples 10`) are recommended. These numbers are
 from one seed; how much the count changes between seeds has not been measured yet.
 
+### Looking at the models in a browser
+
+`--viewer` also writes `viewer/index.html` in the output folder, a page for the models of one
+prediction together:
+
+```
+bioplexpy-structure boltz_results_run/ --uniprots P61158 P61160 Q92747 O15144 O15145 P59998 O15511 \
+    --compute-scores --viewer --out-dir results/
+```
+
+Open `results/viewer/index.html` in a browser. It shows:
+
+* the structure in [Mol\*](https://molstar.org), coloured by chain or by pLDDT, with a button per
+  model (the models are superposed on the first one, so the view holds still when you switch);
+* the three network panels of the figure, with each protein at the centre of its chain(s): they
+  turn as the structure is turned. In the model panel a line's width is the number of models that
+  have the contact;
+* the PAE of the model shown, as a heatmap. Clicking a cell marks the two residues in the structure;
+* a table of the protein pairs: in how many models each is a contact, its score in the model
+  shown, and whether BioPlex detected it. Clicking a pair (or its line in a network) marks its
+  interface residues in the structure and its blocks in the heatmap.
+
+The two sliders hide contacts found in fewer than a number of models, or scoring below a cutoff;
+they change what is drawn, not what was measured. What counts as a contact is set on the command
+line, as for the tables, and stated at the top of the page.
+
+The page is a folder of plain files that needs no server. It loads Mol\* from the web
+(cdn.jsdelivr.net), so the structure panel needs a connection; the rest works without one. Each
+model's coordinates and PAE are in a file of their own, read when that model is first shown. All
+the structures given must be models of the same prediction.
+
 Predicted structures are subject to their predictor's terms; AlphaFold Server output is for
 non-commercial use only (see the `terms_of_use.md` inside the zip).
 

@@ -17,6 +17,11 @@ For each structure file this writes, into --out-dir:
                         opacity by default; with several --confidence-style
                         values, one figure each: <name>_figure_<style>.png
   <name>_structure.html interactive py3Dmol view (--interactive only)
+and, with --viewer:
+  viewer/index.html     a page for the models of one prediction together: the
+                        3D structure (Mol*), the network panels turning with
+                        it, the PAE heatmap, and in how many models each pair
+                        is a contact (see bioplexpy/viewer.py)
 and, when two or more structures are processed:
   summary_contacts.tsv  every protein pair, how many of the models have it
                         as a contact, per-model columns, BioPlex columns,
@@ -527,6 +532,13 @@ def build_parser():
                              'network PNG, instead of the static 4-panel PNG '
                              '(which needs pymol-open-source)')
     output.add_argument('--dpi', type=int, default=150)
+    output.add_argument('--viewer', action='store_true',
+                        help='also write viewer/index.html: an interactive page for '
+                             'the models of one prediction (3D structure, the network '
+                             'panels turning with it, PAE heatmap, in how many models '
+                             'each pair is a contact). Open it in a browser; it loads '
+                             'the Mol* viewer from the web. The contact settings are '
+                             'the ones given here')
     output.add_argument('--reference', metavar='PDB_ID_OR_FILE',
                         help='experimental structure to compare against in '
                              'summary_contacts.tsv, e.g. --reference 6YW7')
@@ -586,9 +598,31 @@ def main(argv=None):
         return _run(parser, args, chain_map, uniprots, zip_extract_root)
 
 
+def _write_viewer(structure_files, names, contacts_by_name, args, chain_map, uniprots,
+                  bp_293t_df, bp_hct116_df, reference):
+    '''Write the --viewer page for the structures that were processed; returns its path.'''
+    from bioplexpy.analysis_funcs import map_chains_to_uniprot
+    from bioplexpy.viewer import write_viewer
+
+    # model 10 after model 9, not after model 1: the first file is the one
+    # the others are superposed on
+    def in_order(path):
+        return [int(part) if part.isdigit() else part
+                for part in re.split(r'(\d+)', os.path.basename(path))]
+
+    files = sorted((f for f in structure_files if names[f] in contacts_by_name), key=in_order)
+    # the models of one prediction have the same chains: map them once
+    if chain_map is None:
+        chain_map, _ = map_chains_to_uniprot(files[0], uniprots,
+                                             min_identity=args.min_identity,
+                                             min_coverage=args.min_coverage)
+    return write_viewer(files, names, contacts_by_name, args, chain_map, bp_293t_df,
+                        bp_hct116_df, args.out_dir, reference=reference)
+
+
 def _run(parser, args, chain_map, uniprots, zip_extract_root):
     structure_files, prediction_inputs, display = _collect_structure_files(
-        args.structures, zip_extract_root, include_pae=(args.compute_scores
+        args.structures, zip_extract_root, include_pae=(args.compute_scores or args.viewer
                      or (args.contact_atoms == 'ca'
                          and (args.min_plddt is not None or args.max_pae is not None))))
     if not structure_files:
@@ -627,8 +661,8 @@ def _run(parser, args, chain_map, uniprots, zip_extract_root):
             print(f'{display[structure_file]}: FAILED -- {e}', file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
+    reference = None
     if summarize and (len(contacts_by_name) >= 2 or (contacts_by_name and args.reference)):
-        reference = None
         if args.reference:
             try:
                 reference = reference_contacts(args.reference, args, chain_map, uniprots)
@@ -640,6 +674,19 @@ def _run(parser, args, chain_map, uniprots, zip_extract_root):
         if len(contacts_by_name) >= 2:
             for line in agreement_lines(summary, len(contacts_by_name)):
                 print(line)
+
+    if args.viewer and not summarize:
+        print('warning: no viewer written, because it shows the models of one '
+              'prediction input.', file=sys.stderr)
+    elif args.viewer and contacts_by_name:
+        try:
+            page = _write_viewer(structure_files, names, contacts_by_name, args, chain_map,
+                                 uniprots, bp_293t_df, bp_hct116_df, reference)
+            print(f'Viewer: {page}')
+        except Exception as e:
+            failures += 1
+            print(f'viewer: FAILED -- {e}', file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
     print(f'Wrote results for {len(structure_files) - failures}/{len(structure_files)} '
           f'structure(s) to {args.out_dir}', file=sys.stderr)
