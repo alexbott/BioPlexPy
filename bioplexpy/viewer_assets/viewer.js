@@ -23,7 +23,7 @@ const SCORE_LABELS = {ipsae_calc: 'ipSAE', pair_iptm: 'pair ipTM', ipsae: 'ipSAE
 const scoreName = job.score_names.includes(job.filter.score) ? job.filter.score
   : (job.score_names.includes('pair_iptm') ? 'pair_iptm' : job.score_names[0]);
 const state = {
-  model: 0, rule: 0, colour: 'chain', minK: 1,
+  model: 0, rule: 0, color: 'chain', minK: 1,
   scoreOn: job.filter.min_score != null && scoreName === job.filter.score,
   cut: job.filter.min_score != null ? job.filter.min_score : (job.filter.suggested != null ? job.filter.suggested : 0.3),
   sel: null,          // {a, b}: the selected protein pair
@@ -100,7 +100,7 @@ function prepare(m) {
 }
 
 /* ---------- the 3D viewer (Mol*) ---------- */
-const PLDDT_COLOURS = [[90, 0x0053d6], [70, 0x65cbf3], [50, 0xffdb13], [-Infinity, 0xff7d45]];  // Mol*'s own
+const PLDDT_COLORS = [[90, 0x0053d6], [70, 0x65cbf3], [50, 0xffdb13], [-Infinity, 0xff7d45]];  // Mol*'s own
 const GREY = 0xb3b3b3;
 const Mol = {
   ready: false, structures: {}, onRotate: null, onResidue: null,
@@ -139,12 +139,12 @@ const Mol = {
     this.ready = true;
     emit();
   },
-  // a colour theme from a function of (chain ID, residue number)
-  addTheme(name, colourOf) {
+  // a color theme from a function of (chain ID, residue number)
+  addTheme(name, colorOf) {
     const S = this.S, P = S.StructureProperties;
     const provider = {name, label: name, category: 'BioPlexPy',
       factory: (ctx, props) => ({factory: provider.factory, granularity: 'group', props, description: '',
-        color: loc => S.StructureElement.Location.is(loc) ? colourOf(P.chain.auth_asym_id(loc), P.residue.auth_seq_id(loc)) : GREY}),
+        color: loc => S.StructureElement.Location.is(loc) ? colorOf(P.chain.auth_asym_id(loc), P.residue.auth_seq_id(loc)) : GREY}),
       getParams: () => ({}), defaultValues: {}, isApplicable: () => true};
     this.plugin.representation.structure.themes.colorThemeRegistry.add(provider);
   },
@@ -165,12 +165,12 @@ const Mol = {
     this.structures[i] = H.current.structures.find(s => !before.has(s.cell.transform.ref));
     this.addTheme('bpv-plddt-' + i, (chain, resi) => {
       const v = m.plddtOf[chain] && m.plddtOf[chain][resi];
-      return v == null ? GREY : PLDDT_COLOURS.find(([floor]) => v > floor)[1];
+      return v == null ? GREY : PLDDT_COLORS.find(([floor]) => v > floor)[1];
     });
-    await this.colour(i, state.colour);
+    await this.color(i, state.color);
     if (Object.keys(this.structures).length === 1) { this.plugin.canvas3d.handleResize(); this.plugin.managers.camera.reset(); }
   },
-  async colour(i, mode) {
+  async color(i, mode) {
     const s = this.structures[i];
     if (s) await this.plugin.managers.structure.component.updateRepresentationsTheme(
       s.components, {color: mode === 'plddt' ? 'bpv-plddt-' + i : 'bpv-chain'});
@@ -231,7 +231,7 @@ function panelEdges(panel) {
   const out = [];
   if (panel === 'all') {
     job.bioplex_edges.forEach(e => out.push({a: e.a, b: e.b, k: key(e.a, e.b),
-      colour: e.bp293 && e.bpHct ? '#929591' : e.bp293 ? '#e50000' : '#0343df',
+      color: e.bp293 && e.bpHct ? '#929591' : e.bp293 ? '#e50000' : '#0343df',
       width: shown(key(e.a, e.b)) ? 3.5 : 1.2, alpha: 1, dashed: false}));
     return out;
   }
@@ -240,9 +240,9 @@ function panelEdges(panel) {
     if (n < state.minK || n === 0) continue;
     const e = edges[k], here = inModel(k, state.model), pair = pairByKey[k];
     const dashed = nodeById[e.a].type !== 'protein' || nodeById[e.b].type !== 'protein';
-    if (panel === 'model') out.push({a: e.a, b: e.b, k, dashed, colour: here ? '#4c4c4c' : '#c8c8c8',
+    if (panel === 'model') out.push({a: e.a, b: e.b, k, dashed, color: here ? '#4c4c4c' : '#c8c8c8',
       width: 1.2 + 4.8 * n / N, alpha: 1});
-    else out.push({a: e.a, b: e.b, k, dashed, colour: pair && pair.bp293 ? '#15b01a' : '#929591',
+    else out.push({a: e.a, b: e.b, k, dashed, color: pair && pair.bp293 ? '#15b01a' : '#929591',
       width: 3, alpha: here ? 1 : 0.3});
   }
   return out;
@@ -268,7 +268,7 @@ function drawPanel(p) {
   const selected = state.sel && key(state.sel.a, state.sel.b);
   p.edges.forEach(e => {
     const a = p.pos[e.a], b = p.pos[e.b];
-    g.globalAlpha = e.alpha; g.lineWidth = e.width; g.strokeStyle = e.colour; g.lineCap = 'round';
+    g.globalAlpha = e.alpha; g.lineWidth = e.width; g.strokeStyle = e.color; g.lineCap = 'round';
     g.setLineDash(e.dashed ? [6, 5] : []);
     if (e.k === selected) { g.save(); g.globalAlpha = 1; g.lineWidth = e.width + 6; g.strokeStyle = '#ffd33d'; g.setLineDash([]);
       g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke(); g.restore(); }
@@ -373,8 +373,8 @@ function selectPair(sel) {
 
 /* ---------- PAE heatmap ---------- */
 const pae = $('pae'), over = $('pae-over');
-const paeColour = v => { const t = Math.min(1, v / 255); return [Math.round(0 + 255 * t), Math.round(83 + 172 * t), Math.round(28 + 227 * t)]; };
-$('pae-scale').style.background = 'linear-gradient(to right, rgb(' + paeColour(0) + '), rgb(' + paeColour(255) + '))';
+const paeColor = v => { const t = Math.min(1, v / 255); return [Math.round(0 + 255 * t), Math.round(83 + 172 * t), Math.round(28 + 227 * t)]; };
+$('pae-scale').style.background = 'linear-gradient(to right, rgb(' + paeColor(0) + '), rgb(' + paeColor(255) + '))';
 function drawPae() {
   const m = BPV.models[state.model];
   $('pae-panel').style.display = m && !m.pae ? 'none' : '';
@@ -382,7 +382,7 @@ function drawPae() {
   const n = m.pae.n, g = pae.getContext('2d');
   pae.width = pae.height = n;
   const image = g.createImageData(n, n), bytes = m.pae.bytes;
-  for (let i = 0; i < n * n; i++) { const c = paeColour(bytes[i]);
+  for (let i = 0; i < n * n; i++) { const c = paeColor(bytes[i]);
     image.data[4 * i] = c[0]; image.data[4 * i + 1] = c[1]; image.data[4 * i + 2] = c[2]; image.data[4 * i + 3] = 255; }
   g.putImageData(image, 0, 0);
   $('pae-note').textContent = '(model ' + state.model + ', ' + m.pae_rows + ' rows' + (m.pae.factor > 1 ? ', averaged over blocks of ' + m.pae.factor : '') + ')';
@@ -511,8 +511,8 @@ function setup() {
     const change = () => { state.scoreOn = on.checked; state.cut = +cut.value; text(); drawNets(); drawTable(); };
     on.addEventListener('change', change); cut.addEventListener('input', change); text();
   }
-  document.querySelectorAll('input[name=colour]').forEach(r => r.addEventListener('change', async () => {
-    state.colour = r.value; for (const i in Mol.structures) await Mol.colour(+i, state.colour); }));
+  document.querySelectorAll('input[name=color]').forEach(r => r.addEventListener('change', async () => {
+    state.color = r.value; for (const i in Mol.structures) await Mol.color(+i, state.color); }));
   window.addEventListener('resize', () => { drawNets(); drawPaeOverlay(); });
   Mol.onRotate = R => { state.R = R; drawNets(); };
   Mol.onResidue = (kind, r) => {

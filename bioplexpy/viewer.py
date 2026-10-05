@@ -270,7 +270,7 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
     reference_file = structure_files[0]
     contact = rules[0]['contact']
     # chain map with the stand-in IDs for nucleic acid and unmapped chains,
-    # colours, labels and the reference's display orientation: exactly what
+    # colors, labels and the reference's display orientation: exactly what
     # the static figure uses
     figure = _prepare_figure2_inputs(
         reference_file, None, bp_293t_df, bp_hct116_df,

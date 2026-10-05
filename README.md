@@ -176,7 +176,7 @@ bioplexpy-structure boltz_results_run/ --uniprots P61158 P61160 Q92747 O15144 O1
 Open `results/viewer/index.html` in a browser. It shows:
 
 * the structure in [Mol\*](https://molstar.org), as a cartoon in Mol\*'s illustrative style,
-  coloured by chain or by pLDDT, with a button per
+  colored by chain or by pLDDT, with a button per
   model (the models are superposed on the first one, so the view holds still when you switch);
 * the three network panels of the figure, with each protein at the centre of its chain(s): they
   turn as the structure is turned. In the model panel a line's width is the number of models that
