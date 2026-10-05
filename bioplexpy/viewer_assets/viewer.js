@@ -24,7 +24,7 @@ const scoreName = job.score_names.includes(job.filter.score) ? job.filter.score
 const state = {
   model: 0, colour: 'chain', minK: 1,
   scoreOn: job.filter.min_score != null && scoreName === job.filter.score,
-  cut: job.filter.min_score != null ? job.filter.min_score : 0.3,
+  cut: job.filter.min_score != null ? job.filter.min_score : (job.filter.suggested != null ? job.filter.suggested : 0.3),
   sel: null,          // {a, b}: the selected protein pair
   cell: null,         // [row, column] of a clicked PAE cell
   hoverNode: null, hoverChain: null, hoverResidue: null,
@@ -55,6 +55,10 @@ function passes(k, m) {
 }
 const inModel = (k, m) => !!edges[k] && edges[k].contact[m] && passes(k, m);
 const count = k => { let n = 0; for (let m = 0; m < N; m++) if (inModel(k, m)) n++; return n; };
+// in how many models the pair is a contact at all, whatever its score
+const contacts = k => edges[k] ? edges[k].contact.filter(Boolean).length : 0;
+// as the command line prints it: 'contact in 5 of 5 (2 pass the score filter)'
+const countText = k => contacts(k) + ' of ' + N + (state.scoreOn ? ' (' + count(k) + ' pass)' : '');
 const shown = k => count(k) >= state.minK;
 
 /* ---------- loading a model's data file on first use ---------- */
@@ -264,11 +268,14 @@ function drawPanel(p) {
     g.setLineDash(n.type !== 'protein' ? [4, 3] : []); g.stroke(); g.setLineDash([]);
   });
   // labels last, so that no node covers one
-  g.font = '600 12px system-ui, sans-serif'; g.textBaseline = 'middle'; g.lineJoin = 'round';
-  nodes.forEach(n => { const q = p.pos[n.id], right = q.x > w / 2, tx = q.x + (right ? q.r + 4 : -q.r - 4);
-    g.textAlign = right ? 'left' : 'right';
-    g.lineWidth = 3; g.strokeStyle = 'rgba(255,255,255,0.9)'; g.strokeText(n.label, tx, q.y);
-    g.fillStyle = '#1f2328'; g.fillText(n.label, tx, q.y); });
+  g.font = '600 12px system-ui, sans-serif'; g.lineJoin = 'round';
+  // each label on the side of its node that faces away from the middle of the panel
+  nodes.forEach(n => { const q = p.pos[n.id], dx = q.x - w / 2, dy = q.y - h / 2, d = Math.hypot(dx, dy) || 1;
+    const ux = d < 2 ? 1 : dx / d, uy = d < 2 ? 0 : dy / d, tx = q.x + ux * (q.r + 5), ty = q.y + uy * (q.r + 5);
+    g.textAlign = ux > 0.35 ? 'left' : ux < -0.35 ? 'right' : 'center';
+    g.textBaseline = uy > 0.6 ? 'top' : uy < -0.6 ? 'bottom' : 'middle';
+    g.lineWidth = 3; g.strokeStyle = 'rgba(255,255,255,0.9)'; g.strokeText(n.label, tx, ty);
+    g.fillStyle = '#1f2328'; g.fillText(n.label, tx, ty); });
 }
 let drawQueued = false;
 function drawNets() { if (drawQueued) return; drawQueued = true;
@@ -292,7 +299,7 @@ function edgeText(k) {
   const e = edges[k], pair = pairByKey[k];
   const [a, b] = k.split('|');
   let text = nodeById[a].label + ' – ' + nodeById[b].label;
-  if (e) text += ': contact in ' + count(k) + ' of ' + N + ' models';
+  if (e) text += ': contact in ' + contacts(k) + ' of ' + N + ' models' + (state.scoreOn ? ' (' + count(k) + ' pass the score cutoff)' : '');
   else text += ': not a contact in any model';
   const v = pairScore(pair, state.model);
   if (v != null) text += '; ' + (SCORE_LABELS[scoreName] || scoreName) + ' ' + v.toFixed(2) + ' in the model shown';
@@ -326,11 +333,21 @@ function interfaceOf(m, sel) {
   });
   return {residues, chainPairs};
 }
+function selectionNote() {
+  const m = BPV.models[state.model], sel = state.sel;
+  let text = '';
+  if (sel && m) {
+    const name = nodeById[sel.a].label + ' – ' + nodeById[sel.b].label, n = interfaceOf(m, sel).residues.reduce((s, r) => s + r.resi.length, 0);
+    text = n ? name + ': ' + n + ' interface residues marked in model ' + state.model + '.'
+      : name + ' is not a contact in model ' + state.model + ', so there is no interface to mark.';
+  }
+  $('sel-note').textContent = text;
+}
 function selectPair(sel) {
   state.sel = sel; state.cell = null;
   const m = BPV.models[state.model];
   Mol.select(state.model, interfaceOf(m, sel).residues, true);
-  drawNets(); drawPaeOverlay(); drawTable();
+  drawNets(); drawPaeOverlay(); drawTable(); selectionNote();
 }
 
 /* ---------- PAE heatmap ---------- */
@@ -398,7 +415,7 @@ over.addEventListener('mousemove', ev => { const c = paeCell(ev);
 over.addEventListener('mouseleave', () => { $('pae-hover').textContent = ''; });
 over.addEventListener('click', ev => { const c = paeCell(ev);
   if (!c || !c.a || !c.b) return;
-  state.sel = null; state.cell = [c.row, c.col];
+  state.sel = null; state.cell = [c.row, c.col]; $('sel-note').textContent = residueText(c.a) + ' and ' + residueText(c.b) + ' marked.';
   Mol.select(state.model, [{chain: c.a.chain, resi: [c.a.resi]}, {chain: c.b.chain, resi: [c.b.resi]}], false);
   drawNets(); drawPaeOverlay(); drawTable(); });
 
@@ -409,11 +426,12 @@ function drawTable() {
     ['293T', 'HCT116'], job.has_reference ? ['Reference'] : []);
   document.querySelector('#pairs thead').innerHTML = '<tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr>';
   const body = document.querySelector('#pairs tbody'); body.textContent = '';
+  if (!job.pairs.length) { body.innerHTML = '<tr><td colspan="' + head.length + '">No pair of these proteins is a contact in a model or an interaction in BioPlex.</td></tr>'; return; }
   const yes = v => v ? 'yes' : '–';
   job.pairs.map(p => ({p, k: key(p.a, p.b)})).map(x => Object.assign(x, {n: count(x.k)}))
     .sort((x, y) => y.n - x.n).forEach(({p, k, n}) => {
       const tr = document.createElement('tr'), v = pairScore(p, state.model);
-      const cells = [nodeById[p.a].label + ' – ' + nodeById[p.b].label, n + ' of ' + N, yes(inModel(k, state.model))]
+      const cells = [nodeById[p.a].label + ' – ' + nodeById[p.b].label, countText(k), yes(inModel(k, state.model))]
         .concat(scoreName ? [v == null ? '' : v.toFixed(2)] : [], [yes(p.bp293), yes(p.bpHct)], job.has_reference ? [yes(p.reference)] : []);
       tr.innerHTML = cells.map(c => '<td>' + c + '</td>').join('');
       if (n < state.minK) tr.className = 'dim';
@@ -439,6 +457,7 @@ async function showModel(i) {
     drawPae();
     if (Mol.ready) { await Mol.load(i, m); if (state.model !== i) return; Mol.show(i);
       Mol.select(i, interfaceOf(m, state.sel).residues, false); }
+    selectionNote();
   } catch (e) { $('mol-message').hidden = false; $('mol-message').textContent = String(e.message || e); }
 }
 function setup() {

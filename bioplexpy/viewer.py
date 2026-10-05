@@ -256,7 +256,7 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
     (job, models): job is a dict for job.js, models a list of dicts, one
     per model, for model_<n>.js
     '''
-    from bioplexpy.analysis_funcs import (PDB_chains_to_uniprot,
+    from bioplexpy.analysis_funcs import (SUGGESTED_MIN_SCORE, PDB_chains_to_uniprot,
                                           _bioplex_edges_and_roles,
                                           _direct_interaction_chain_pairs,
                                           _load_pdb_model, classify_chain,
@@ -392,7 +392,9 @@ def build_viewer_data(structure_files, names, contacts_by_name, summary, contact
         'title': title or _job_title(names_in_order),
         'tool': sorted(tools)[0] if len(tools) == 1 else None,
         'contact': contact,
-        'filter': {'min_score': min_score, 'score': filter_score, 'reduce': filter_reduce},
+        'filter': {'min_score': min_score, 'score': filter_score, 'reduce': filter_reduce,
+                   # where the page's cutoff slider starts when no --min-score was given
+                   'suggested': SUGGESTED_MIN_SCORE.get(sorted(tools)[0]) if len(tools) == 1 else None},
         'score_names': score_names,
         'chains': [{'id': chain, 'type': chain_types[chain],
                     'color': figure['chain_color_palette'].get(chain, '#b3b3b3'),
