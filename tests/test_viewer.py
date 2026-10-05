@@ -26,7 +26,8 @@ from bioplexpy.analysis_funcs import (_ca_interface, _direct_interaction_chain_p
                                       resolve_contact_settings)
 from bioplexpy.cli import _resolve_filter_args, build_parser, summarize_contacts
 from bioplexpy.viewer import (ASSET_FILES, PAE_STEP, _protein_ca, build_viewer_data,
-                              contact_rules, interface_residues, kabsch, pack_pae,
+                              contact_rules, interface_residues, kabsch, one_copy_per_protein,
+                              pack_pae,
                               unpack_pae, write_viewer)
 
 HERE = os.path.dirname(__file__)
@@ -151,6 +152,17 @@ def test_node_positions_are_in_the_same_frame_as_the_coordinates():
         for chain, uniprot in ARP23_CHAINS.items():
             centroid = np.mean([atom.coord for residue in model[chain] for atom in residue], axis=0)
             assert np.allclose(job['models'][index]['centroids'][uniprot], centroid, atol=0.02)
+
+
+def test_a_protein_in_two_copies_is_placed_on_one_of_them():
+    # two copies of P1 and of P2 around a twofold axis: the means of the copies would
+    # coincide on the axis
+    centroids = {'A': np.array([10., 0, 0]), 'B': np.array([12., 5, 0]),
+                 'C': np.array([-10., 0, 0]), 'D': np.array([-12., -5, 0])}
+    chains = {'A': ['P1'], 'B': ['P2'], 'C': ['P1'], 'D': ['P2']}
+    kept = one_copy_per_protein(chains, centroids)
+    assert sorted(kept) == ['A', 'B']        # the copies next to the first chain
+    assert one_copy_per_protein({'A': ['P1'], 'B': ['P2']}, centroids).keys() == {'A', 'B'}
 
 
 def test_interface_residues_are_the_contact_rule_s():

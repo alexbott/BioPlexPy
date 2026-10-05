@@ -72,6 +72,32 @@ def _chain_sequences(model):
     return {chain.get_id(): [residue.get_resname() for residue in chain] for chain in model}
 
 
+def one_copy_per_protein(chain_ids_map, centroids):
+    """
+    The chain centroids with one chain kept per protein.
+
+    A protein present in several copies would otherwise get the mean of
+    its copies as its node position. In a symmetric assembly those means
+    fall on the symmetry axis (the 28 chains of a 20S proteasome give 14
+    points on one line), and the network panels, which turn with the
+    structure, show nothing. For each protein the copy nearest to the
+    first chain of the structure is kept, so the nodes are those of one
+    neighbourhood of the assembly.
+    """
+    chains = [c for c in chain_ids_map if c in centroids]
+    if not chains:
+        return {}
+    start = centroids[chains[0]]
+    kept = {}
+    for chain in chains:
+        for protein in chain_ids_map[chain]:
+            best = kept.get(protein)
+            if best is None or (np.linalg.norm(centroids[chain] - start)
+                                < np.linalg.norm(centroids[best] - start)):
+                kept[protein] = chain
+    return {chain: centroids[chain] for chain in set(kept.values())}
+
+
 def common_frame(model, reference_ca, frame_rotation, frame_center):
     '''
     The transform that puts `model` in the page's common frame: fitted onto
@@ -332,7 +358,8 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                           for atom in residue]
                 if coords and classify_chain(chain) != 'other':
                     centroids[chain.get_id()] = rotation @ (np.mean(coords, axis=0) - center)
-            node_ids, node_points = _protein_centroids(chain_ids_map, centroids)
+            node_ids, node_points = _protein_centroids(
+                chain_ids_map, one_copy_per_protein(chain_ids_map, centroids))
 
             residues = {chain.get_id(): [residue.id[1] for residue in chain]
                         for chain in model if chain.get_id() in chain_types}
