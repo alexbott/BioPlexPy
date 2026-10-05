@@ -35,6 +35,7 @@ PAE_STEP = 0.125
 # a larger PAE matrix is block-averaged down to at most this many rows
 MAX_PAE_ROWS = 3000
 
+NON_PROTEIN_COLOR = '#ffffff'
 # the model-level scores each predictor writes, most informative first
 MODEL_SCORE_KEYS = {
     'boltz': ('confidence_score', 'iptm', 'ptm', 'complex_plddt'),
@@ -441,7 +442,10 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                    'suggested': SUGGESTED_MIN_SCORE.get(sorted(tools)[0]) if len(tools) == 1 else None},
         'score_names': score_names,
         'chains': [{'id': chain, 'type': chain_types[chain],
-                    'color': figure['chain_color_palette'].get(chain, '#b3b3b3'),
+                    # white is kept for chains that are not protein, as their nodes in the
+                    # networks are (open, dashed); the palette for proteins has no white
+                    'color': (figure['chain_color_palette'].get(chain, '#b3b3b3')
+                              if chain_types[chain] == 'protein' else NON_PROTEIN_COLOR),
                     'ids': chain_ids_map.get(chain, []),
                     'length': len(models[0]['residues'].get(chain, []))}
                    for chain in chain_types],
