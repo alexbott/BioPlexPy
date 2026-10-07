@@ -215,7 +215,9 @@ def test_page_numbers_equal_the_tables():
                   ).max() <= PAE_STEP / 2 + 1e-6
     for chain in ARP23_CHAINS:
         assert len(models[0]['rows'][chain]) == len(models[0]['residues'][chain]) \
-            == len(models[0]['plddt'][chain])
+            == len(models[0]['plddt'][chain]) == len(models[0]['sequence'][chain])
+    # one letter per residue, the amino acid's
+    assert models[0]['sequence']['A'].startswith('M') and 'X' not in models[0]['sequence']['A']
 
 
 def test_viewer_folder_is_written():

@@ -9,7 +9,7 @@ static figure use; the page only displays it. write_viewer() writes a folder:
 
   viewer/index.html, viewer.js, viewer.css   the page (copied from viewer_assets/)
   viewer/job.js                              chains, nodes, pairs, per-model summaries
-  viewer/model_<n>.js                        one model: coordinates, PAE, pLDDT, interfaces
+  viewer/model_<n>.js                        one model: coordinates, sequences, PAE, pLDDT, interfaces
 
 The data files are JavaScript, not JSON, because a page opened from a local
 folder may load scripts but may not fetch files. A model's file is loaded
@@ -73,6 +73,26 @@ def _protein_ca(model):
 def _chain_sequences(model):
     '''Residue names of every chain, in file order: what two models of one job must share.'''
     return {chain.get_id(): [residue.get_resname() for residue in chain] for chain in model}
+
+
+def residue_letters(chain):
+    '''
+    One letter per residue of a chain, in file order (the order of its
+    residue numbers in the page's data): the amino acid, the base of a
+    nucleotide, X for anything else.
+    '''
+    from Bio.Data.PDBData import protein_letters_3to1_extended
+
+    letters = []
+    for residue in chain:
+        name = residue.get_resname().strip().upper()
+        if residue.id[0] != ' ':
+            letters.append('X')
+        elif name in ('A', 'C', 'G', 'U', 'DA', 'DC', 'DG', 'DT'):
+            letters.append(name[-1])
+        else:
+            letters.append(protein_letters_3to1_extended.get(name, 'X'))
+    return ''.join(letters)
 
 
 def one_copy_per_protein(chain_ids_map, centroids):
@@ -378,6 +398,8 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                 'pae': pack_pae(pae_data['pae']) if pae_data is not None else None,
                 'pae_rows': int(pae_data['pae'].shape[0]) if pae_data is not None else 0,
                 'rows': rows, 'residues': residues, 'plddt': plddt,
+                'sequence': {chain.get_id(): residue_letters(chain) for chain in model
+                             if chain.get_id() in chain_types},
                 'interfaces': interfaces,
             })
             model_summaries.append({

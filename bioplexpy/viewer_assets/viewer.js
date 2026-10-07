@@ -219,6 +219,12 @@ const Mol = {
     I.lociSelects.select({loci});
     if (zoom) this.plugin.managers.camera.focusLoci(loci, {extraRadius: 14});
   },
+  highlightResidue(i, chain, resi) {
+    if (!this.ready || !this.structure(i)) return;
+    const I = this.plugin.managers.interactivity;
+    if (chain == null) I.lociHighlights.clearHighlights();
+    else I.lociHighlights.highlightOnly({loci: this.loci(i, [{chain, resi: [resi]}])});
+  },
   highlightChains(i, chains) {
     if (!this.ready || !this.structure(i)) return;
     const I = this.plugin.managers.interactivity;
@@ -391,7 +397,58 @@ function selectPair(sel) {
   state.sel = sel; state.cell = null;
   const m = BPV.models[state.model];
   Mol.select(state.model, interfaceOf(m, sel).residues, true);
-  drawNets(); drawPaeOverlay(); drawTable(); selectionNote();
+  drawNets(); drawPaeOverlay(); drawTable(); selectionNote(); drawSeq();
+}
+
+/* ---------- sequences ---------- */
+const hexColor = v => '#' + v.toString(16).padStart(6, '0');
+// the color of a residue's letter: the structure's coloring, lighter where it is the chain's
+function residueColor(m, chain, resi) {
+  if (state.color === 'plddt') { const v = m.plddtOf[chain.id] && m.plddtOf[chain.id][resi];
+    return v == null ? null : hexColor(PLDDT_COLORS.find(([floor]) => v > floor)[1]); }
+  return chain.color + '59';
+}
+const chainLabel = c => (nodeById[c.ids[0]] ? nodeById[c.ids[0]].label + ' ' : '') + c.id;
+// one line of letters per chain of the model shown; the residues of the selected pair's
+// interface are bold and underlined
+function drawSeq() {
+  const m = BPV.models[state.model], box = $('seq');
+  if (!m || !m.sequence) { box.textContent = ''; return; }
+  const marked = {};
+  interfaceOf(m, state.sel).residues.forEach(r => { const s = marked[r.chain] = marked[r.chain] || new Set(); r.resi.forEach(n => s.add(n)); });
+  let html = '';
+  job.chains.forEach(c => { const letters = m.sequence[c.id];
+    if (!letters) return;
+    html += '<div class="seq-row"><span class="seq-name">' + chainLabel(c) + '</span>';
+    m.residues[c.id].forEach((n, k) => { const color = residueColor(m, c, n);
+      html += '<span class="r' + (marked[c.id] && marked[c.id].has(n) ? ' if' : '') + '" data-c="' + c.id + '" data-n="' + n + '"'
+        + (color ? ' style="background:' + color + '"' : '') + '>' + letters[k] + '</span>'; });
+    html += '</div>'; });
+  box.innerHTML = html;
+}
+const seqResidue = ev => { const el = ev.target.closest && ev.target.closest('.r');
+  return el ? {chain: el.dataset.c, resi: +el.dataset.n, letter: el.textContent} : null; };
+$('seq').addEventListener('mousemove', ev => { const r = seqResidue(ev), m = BPV.models[state.model];
+  if (!r) { showTip(ev, null); return; }
+  const v = m && m.plddtOf[r.chain] && m.plddtOf[r.chain][r.resi];
+  showTip(ev, chainLabel(chainById[r.chain]) + ': ' + r.letter + r.resi + (v != null ? ', pLDDT ' + v.toFixed(0) : ''));
+  Mol.highlightResidue(state.model, r.chain, r.resi); });
+$('seq').addEventListener('mouseleave', () => { tip.hidden = true; Mol.highlightResidue(state.model, null); });
+$('seq').addEventListener('click', ev => { const r = seqResidue(ev);
+  if (!r) return;
+  state.sel = null; state.cell = null;
+  $('sel-note').textContent = chainLabel(chainById[r.chain]) + ': ' + r.letter + r.resi + ' marked.';
+  Mol.select(state.model, [{chain: r.chain, resi: [r.resi]}], false);
+  drawNets(); drawPaeOverlay(); drawTable(); drawSeq(); });
+// the residue under the pointer in the structure, marked in the sequences and brought into view
+function markSeq(r) {
+  const box = $('seq'), old = box.querySelector('.r.hov');
+  if (old) old.classList.remove('hov');
+  const el = r && box.querySelector('.r[data-c="' + r.chain + '"][data-n="' + r.resi + '"]');
+  if (!el) return;
+  el.classList.add('hov');
+  const top = el.offsetTop - box.offsetTop;
+  if (top < box.scrollTop || top > box.scrollTop + box.clientHeight - 20) box.scrollTop = top - box.clientHeight / 2;
 }
 
 /* ---------- PAE heatmap ---------- */
@@ -498,7 +555,7 @@ async function showModel(i) {
   try {
     const m = await modelData(i);
     if (state.model !== i) return;
-    drawPae();
+    drawPae(); drawSeq();
     if (Mol.ready) { await Mol.load(i, m); if (state.model !== i) return; Mol.show(i);
       Mol.select(i, interfaceOf(m, state.sel).residues, false); }
     selectionNote();
@@ -532,7 +589,7 @@ function setup() {
     b.addEventListener('click', () => { useRule(i); ruleNote();
       document.querySelectorAll('#rules button').forEach((x, j) => x.classList.toggle('on', j === i));
       Mol.select(state.model, interfaceOf(BPV.models[state.model], state.sel).residues, false);
-      drawNets(); drawPaeOverlay(); drawTable(); selectionNote(); });
+      drawNets(); drawPaeOverlay(); drawTable(); selectionNote(); drawSeq(); });
     $('rules').appendChild(b); });
   if (job.rules.length === 1) $('rules').closest('.group').style.display = 'none';
   job.models.forEach((m, i) => { const b = document.createElement('button'); b.textContent = i; b.title = modelText(i);
@@ -551,14 +608,14 @@ function setup() {
     on.addEventListener('change', change); cut.addEventListener('input', change); text();
   }
   document.querySelectorAll('input[name=color]').forEach(r => r.addEventListener('change', async () => {
-    state.color = r.value; for (const i in Mol.refs) await Mol.color(+i, state.color); }));
+    state.color = r.value; drawSeq(); for (const i in Mol.refs) await Mol.color(+i, state.color); }));
   window.addEventListener('resize', () => { drawNets(); drawPaeOverlay(); });
   Mol.onRotate = R => { state.R = R; drawNets(); };
   Mol.onResidue = (kind, r) => {
     if (kind === 'hover') { const chain = r ? r.chain : null;
       const changed = chain !== state.hoverChain || (r && state.hoverResidue && r.resi !== state.hoverResidue.resi) || (!r !== !state.hoverResidue);
       state.hoverChain = chain; state.hoverResidue = r;
-      if (changed) { drawNets(); drawPaeOverlay(); } }
+      if (changed) { drawNets(); drawPaeOverlay(); markSeq(r); } }
   };
 }
 setup();
