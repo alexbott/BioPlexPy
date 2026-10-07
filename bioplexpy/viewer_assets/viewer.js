@@ -617,10 +617,10 @@ function drawOverview() {
       + residues.toLocaleString('en-US') + ' residues, ' + N + ' model' + (N1 ? 's' : '')),
     scores.length ? item('Confidence', scores.join(', ') + (N1 ? ' over the models' : '')) : '',
     item('Contacts (' + rule.label + ')', button('any', pairs(sets.any.length), 'Protein pairs in contact' + (N1 ? ' in at least one model' : ''))
-      + (N1 ? ', ' + button('all', sets.all.length + ' in all ' + N + ' models', 'Protein pairs in contact in every model') : '')),
-    item('Detected by BioPlex', button('bp293', sets.bp293.length + ' in 293T', 'Pairs in contact that BioPlex detected in 293T') + ', '
-      + button('bpHct', sets.bpHct.length + ' in HCT116', 'Pairs in contact that BioPlex detected in HCT116') + ' of ' + sets.any.length
-      + '; ' + button('missed', sets.missed.length + ' not in contact', 'BioPlex interactions between these proteins that are not a contact in any model')),
+      + (N1 ? button('all', sets.all.length + ' in all ' + N + ' models', 'Protein pairs in contact in every model') : '')),
+    item('Detected by BioPlex', button('bp293', sets.bp293.length + ' in 293T', 'Pairs in contact that BioPlex detected in 293T')
+      + button('bpHct', sets.bpHct.length + ' in HCT116', 'Pairs in contact that BioPlex detected in HCT116') + '<span>of ' + sets.any.length + ';</span>'
+      + button('missed', sets.missed.length + ' not in contact', 'BioPlex interactions between these proteins that are not a contact in any model')),
     job.models[0].interfaces ? item('Close, not a contact', button('failing', pairs(sets.failing.length),
       'Pairs with residues close enough in some model that fail the rule in every model: see the columns Residue pairs and Failing')) : '',
   ];
