@@ -82,6 +82,20 @@ In Python the render functions take the same settings (`contact_preset`, `contac
 distance as an argument, keep the paper's any-atom rule unless given `contact_atoms='ca'` or a
 `contact_preset`.
 
+### What an interface is made of
+
+Every run also writes two tables per structure, under the contact rule in use:
+
+* `<name>_interfaces.tsv`, one row per pair of chains with residues close enough: residue pairs
+  close and passing, close pairs failing the pLDDT and the PAE condition (a pair can fail both),
+  median and lowest PAE over the passing and over the close pairs, mean pLDDT of either side. A
+  pair that is close but not a contact is listed too, with `contact` False.
+* `<name>_interface_residues.tsv`, one row per residue with a partner close enough: its pLDDT,
+  how many partner residues pass and are close, and the nearest partner with its distance and PAE.
+
+PAE is the smaller of the two directions, which is the one the rule tests. Under the any-atom
+rule, and for a pair with a nucleic acid chain, close and passing are the same.
+
 ### Filtering contacts by score (optional)
 
 `--min-score VALUE` is a quality filter applied on top of the contact parameters: it hides contacts
@@ -188,7 +202,12 @@ Open `results/viewer/index.html` in a browser. It shows:
 * the PAE of the model shown, as a heatmap. Clicking a cell marks the two residues in the structure;
 * a table of the protein pairs: in how many models each is a contact, its score in the model
   shown, and whether BioPlex detected it. Clicking a pair (or its line in a network) marks its
-  interface residues in the structure and its blocks in the heatmap.
+  interface residues in the structure and its blocks in the heatmap;
+* in the same table, what the interface is made of in the model shown: how many residue pairs
+  pass the contact rule of those that are close enough, how many of the others fail on pLDDT
+  and on PAE, the median and lowest PAE, and the mean pLDDT of either side. This also says why
+  a pair is *not* a contact ("0 of 229; 131 pLDDT, 229 PAE"). The selected pair opens to its
+  residues: pLDDT, partners, nearest partner with distance and PAE; a click brings one into focus.
 
 All panels are side by side; the button "Wide structure" puts the structure across the page
 with the other panels below it, and the page remembers the choice.

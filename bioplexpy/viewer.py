@@ -10,6 +10,7 @@ static figure use; the page only displays it. write_viewer() writes a folder:
   viewer/index.html, viewer.js, viewer.css   the page (copied from viewer_assets/)
   viewer/job.js                              chains, nodes, pairs, per-model summaries
   viewer/model_<n>.js                        one model: coordinates, sequences, PAE, pLDDT, interfaces
+                                             and their residues (bioplexpy/interfaces.py)
 
 The data files are JavaScript, not JSON, because a page opened from a local
 folder may load scripts but may not fetch files. A model's file is loaded
@@ -203,6 +204,28 @@ def interface_residues(model, chain_pairs, contact, pae_data=None):
     return interfaces
 
 
+def _pair_summaries(details, chain_ids_map):
+    '''
+    summarize_interfaces() per protein pair: 'A|B' (the two IDs, sorted) ->
+    the numbers of that pair's interface over all its chain pairs, side A
+    being the first ID.
+    '''
+    from bioplexpy.interfaces import summarize_interfaces
+
+    grouped = {}
+    for detail in details:
+        chain_i, chain_j = detail['chains']
+        for id_i in chain_ids_map.get(chain_i, []):
+            for id_j in chain_ids_map.get(chain_j, []):
+                if id_i == id_j:
+                    continue
+                first, second = sorted((id_i, id_j))
+                chains, flips = grouped.setdefault(f'{first}|{second}', ([], []))
+                chains.append(detail)
+                flips.append(id_i != first)
+    return {pair: summarize_interfaces(chains, flips) for pair, (chains, flips) in grouped.items()}
+
+
 def pack_pae(pae, max_rows=MAX_PAE_ROWS):
     '''
     A PAE matrix as base64 text, one byte per cell (value / PAE_STEP,
@@ -312,6 +335,7 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                                           _direct_interaction_chain_pairs,
                                           _load_pdb_model, classify_chain,
                                           fetch_pdb_structure_file, read_pae)
+    from bioplexpy.interfaces import interface_details, interface_residue_rows
     from bioplexpy.visualization_funcs import (_prepare_figure2_inputs,
                                                _protein_centroids,
                                                _write_rotated_structure)
@@ -349,7 +373,7 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                 warnings.warn(f'PAE for {structure_file} not shown: {e}')
             if pae_data is not None:
                 tools.add(pae_data['tool'])
-            interfaces, edges = {}, {}
+            interfaces, edges, contacts, numbers = {}, {}, {}, {}
             for rule in rules:
                 settings = rule['contact']
                 rule_pae = pae_data if (settings['contact_atoms'] == 'ca'
@@ -363,6 +387,15 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                                                             rule_pae)
                 # every contact, nucleic acid and unmapped chains included
                 edges[rule['id']] = PDB_chains_to_uniprot(chain_pairs, chain_ids_map)
+                # what each interface is made of; the PAE is reported under every rule
+                details = interface_details(model, settings, pae_data, chain_pairs)
+                contacts[rule['id']] = [
+                    {'chains': detail['chains'],
+                     'residues': [[[row['number'], row['n_pass'], row['n_close'], row['partner'],
+                                    row['distance'], row['pae'], row['plddt']] for row in side]
+                                  for side in interface_residue_rows(detail)]}
+                    for detail in details]
+                numbers[rule['id']] = _pair_summaries(details, chain_ids_map)
 
             rotation, center, rmsd = common_frame(model, reference_ca,
                                                   figure['structure_rotation'],
@@ -400,7 +433,7 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                 'rows': rows, 'residues': residues, 'plddt': plddt,
                 'sequence': {chain.get_id(): residue_letters(chain) for chain in model
                              if chain.get_id() in chain_types},
-                'interfaces': interfaces,
+                'interfaces': interfaces, 'contacts': contacts,
             })
             model_summaries.append({
                 'name': name,
@@ -408,7 +441,7 @@ def build_viewer_data(structure_files, names, rules, chain_to_uniprot, bp_293t_d
                 'rmsd_to_first': round(rmsd, 2),
                 'centroids': {node: np.round(point, 2)
                               for node, point in zip(node_ids, node_points)},
-                'edges': edges,
+                'edges': edges, 'interfaces': numbers,
             })
 
     names_in_order = [names[f] for f in structure_files]

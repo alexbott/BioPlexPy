@@ -6,6 +6,10 @@ BioPlex AP-MS data. Installed as `bioplexpy-structure`; also runnable as
 `python -m bioplexpy.cli`.
 
 For each structure file this writes, into --out-dir:
+  <name>_interfaces.tsv, <name>_interface_residues.tsv
+                        what each interface is made of: per chain pair, the residue
+                        pairs that are close and those that pass the contact rule, the
+                        PAE and the pLDDT; per residue, its partners (bioplexpy/interfaces.py)
   <name>_contacts.tsv   structure contacts vs BioPlex 293T/HCT116 edges, plus
                         the predictor's own chain-pair scores for predicted
                         models (AF3/Boltz pair ipTM; ipSAE/pDockQ/pDockQ2 if
@@ -152,6 +156,7 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
                                           filter_contacts_by_score,
                                           map_chains_to_uniprot,
                                           resolve_min_score)
+    from bioplexpy.interfaces import structure_interfaces
     from bioplexpy.visualization_funcs import (get_edge_confidence_scores,
                                                render_figure2_panels,
                                                render_figure2_panels_static)
@@ -191,6 +196,18 @@ def process_structure(structure_file, name, args, chain_map, uniprots,
         *maps, bp_293t_df, bp_hct116_df, interface_confidence=interface_confidence,
         filter_status=filter_status)
     contacts_df.to_csv(os.path.join(args.out_dir, f'{name}_contacts.tsv'),
+                       sep='\t', index=False)
+    # what each interface is made of: per chain pair, and per residue
+    symbols = {**dict(zip(contacts_df.UniprotA, contacts_df.SymbolA)),
+               **dict(zip(contacts_df.UniprotB, contacts_df.SymbolB))}
+    interfaces_df, residues_df = structure_interfaces(
+        structure_file, {'contact_atoms': args.contact_atoms, 'distance': args.distance,
+                         'min_plddt': args.min_plddt, 'max_pae': args.max_pae},
+        {chain: [ids] if isinstance(ids, str) else list(ids)
+         for chain, ids in file_chain_map.items()}, symbols)
+    interfaces_df.to_csv(os.path.join(args.out_dir, f'{name}_interfaces.tsv'),
+                         sep='\t', index=False)
+    residues_df.to_csv(os.path.join(args.out_dir, f'{name}_interface_residues.tsv'),
                        sep='\t', index=False)
 
     if not args.no_render:

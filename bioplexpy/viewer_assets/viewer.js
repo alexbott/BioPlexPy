@@ -576,11 +576,59 @@ over.addEventListener('click', ev => { const c = paeCell(ev);
   drawNets(); drawPaeOverlay(); drawTable(); });
 
 /* ---------- table ---------- */
+// what job.js has on a pair's interface in model i under the rule in use (bioplexpy/interfaces.py),
+// with the two sides in the order of the pair's name
+function interfaceNumbers(p, i) {
+  const all = job.models[i].interfaces, o = all && all[rule.id][key(p.a, p.b)];
+  if (!o) return null;
+  const turn = v => v && (p.a < p.b ? v : [v[1], v[0]]);
+  return Object.assign({}, o, {residues: turn(o.residues), plddt: turn(o.plddt)});
+}
+const INTERFACE_HEAD = [
+  ['Residue pairs', 'Pairs of residues that pass the contact rule, of those that are close enough (within the rule\'s distance)'],
+  ['Failing', 'Close residue pairs that fail the rule\'s pLDDT condition, and its PAE condition; a pair can fail both'],
+  ['PAE', 'Median and lowest PAE over the residue pairs that pass (over the close pairs where none passes), the smaller of the two directions'],
+  ['pLDDT', 'Mean pLDDT of the interface residues of either protein, in the order of the pair\'s name']];
+function interfaceCells(p) {
+  const o = interfaceNumbers(p, state.model);
+  if (!o) return ['', '', '', ''];
+  const pae = o.pae_pass || o.pae_close;
+  return [o.n_pass + ' of ' + o.n_close,
+    o.n_low_plddt == null && o.n_high_pae == null ? '–' : !o.n_low_plddt && !o.n_high_pae ? 'none'
+      : [o.n_low_plddt != null ? o.n_low_plddt + ' pLDDT' : null, o.n_high_pae != null ? o.n_high_pae + ' PAE' : null].filter(Boolean).join(', '),
+    pae ? pae[0].toFixed(1) + ' / ' + pae[1].toFixed(1) + (o.pae_pass ? '' : ' (close)') : '–',
+    o.plddt ? o.plddt.map(v => v == null ? '–' : v.toFixed(0)).join(' / ') : '–'];
+}
+// the residues of the selected pair's interface in the model shown: one line each, either side
+function interfaceDetail(p, m, columns) {
+  const detail = document.createElement('tr'); detail.className = 'detail';
+  const lines = [];
+  ((m && m.contacts && m.contacts[rule.id]) || []).forEach(f => {
+    const ids = f.chains.map(c => chainById[c].ids);
+    const sides = ids[0].includes(p.a) && ids[1].includes(p.b) ? [0, 1] : ids[0].includes(p.b) && ids[1].includes(p.a) ? [1, 0] : null;
+    if (!sides) return;
+    sides.forEach(side => { const c = f.chains[side], other = f.chains[1 - side], letters = m.sequence && m.sequence[c];
+      const at = letters ? Object.fromEntries(m.residues[c].map((r, k) => [r, letters[k]])) : {};
+      const atOther = m.sequence && m.sequence[other] ? Object.fromEntries(m.residues[other].map((r, k) => [r, m.sequence[other][k]])) : {};
+      f.residues[side].forEach(([n, nPass, nClose, partner, distance, pae, plddt]) => lines.push(
+        '<tr class="' + (nPass ? '' : 'dim') + '" data-c="' + c + '" data-n="' + n + '"><td>' + chainLabel(chainById[c]) + '</td><td>' + (at[n] || '') + n + '</td><td>'
+        + (plddt == null ? '–' : plddt.toFixed(0)) + '</td><td>' + nPass + ' of ' + nClose + '</td><td>' + chainLabel(chainById[other]) + ' ' + (atOther[partner] || '') + partner
+        + '</td><td>' + distance.toFixed(1) + '</td><td>' + (pae == null ? '–' : pae.toFixed(1)) + '</td></tr>')); });
+  });
+  detail.innerHTML = '<td colspan="' + columns + '">' + (!m ? 'Loading the model...' : !lines.length ? 'No residues of this pair are close in model ' + state.model + '.'
+    : '<div class="detail-box"><table><thead><tr><th>Chain</th><th>Residue</th><th>pLDDT</th><th title="Partner residues that pass the contact rule, of those that are close">Partners</th>'
+      + '<th title="The nearest partner residue: one that passes, if there is any">Nearest partner</th><th>Distance (Å)</th><th title="PAE to the nearest partner, the smaller of the two directions">PAE (Å)</th></tr></thead><tbody>'
+      + lines.join('') + '</tbody></table></div><div class="legend">Every residue with a partner close enough, in model ' + state.model
+      + '; grey: no partner passes the rule. Click a line to bring the residue into focus.</div>') + '</td>';
+  detail.addEventListener('click', ev => { const tr = ev.target.closest('tr[data-c]');
+    if (tr) Mol.focusResidue(state.model, tr.dataset.c, +tr.dataset.n); });
+  return detail;
+}
 function drawTable() {
   const scoreLabel = SCORE_LABELS[scoreName] || scoreName;
-  const head = ['Pair', 'Contact in', 'Model ' + state.model].concat(scoreName ? [scoreLabel + ' (model ' + state.model + ')'] : [],
-    ['293T', 'HCT116'], job.has_reference ? ['Reference'] : []);
-  document.querySelector('#pairs thead').innerHTML = '<tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr>';
+  const head = [['Pair'], ['Contact in'], ['Model ' + state.model]].concat(scoreName ? [[scoreLabel + ' (model ' + state.model + ')']] : [],
+    INTERFACE_HEAD, [['293T'], ['HCT116']], job.has_reference ? [['Reference']] : []);
+  document.querySelector('#pairs thead').innerHTML = '<tr>' + head.map(([h, title]) => '<th' + (title ? ' title="' + title + '"' : '') + '>' + h + '</th>').join('') + '</tr>';
   const body = document.querySelector('#pairs tbody'); body.textContent = '';
   if (!rule.pairs.length) { body.innerHTML = '<tr><td colspan="' + head.length + '">No pair of these proteins is a contact in a model or an interaction in BioPlex.</td></tr>'; return; }
   const yes = v => v ? 'yes' : '–';
@@ -588,12 +636,15 @@ function drawTable() {
     .sort((x, y) => y.n - x.n).forEach(({p, k, n}) => {
       const tr = document.createElement('tr'), v = pairScore(p, state.model);
       const cells = [nodeById[p.a].label + ' – ' + nodeById[p.b].label, countText(k), yes(inModel(k, state.model))]
-        .concat(scoreName ? [v == null ? '' : v.toFixed(2)] : [], [yes(p.bp293), yes(p.bpHct)], job.has_reference ? [yes(p.reference)] : []);
+        .concat(scoreName ? [v == null ? '' : v.toFixed(2)] : [], interfaceCells(p), [yes(p.bp293), yes(p.bpHct)], job.has_reference ? [yes(p.reference)] : []);
       tr.innerHTML = cells.map(c => '<td>' + c + '</td>').join('');
       if (n < state.minK) tr.className = 'dim';
-      if (state.sel && k === key(state.sel.a, state.sel.b)) tr.classList.add('on');
-      tr.addEventListener('click', () => selectPair({a: p.a, b: p.b}));
+      const selected = state.sel && k === key(state.sel.a, state.sel.b);
+      if (selected) tr.classList.add('on');
+      // a second click on the selected pair closes it
+      tr.addEventListener('click', () => selectPair(selected ? null : {a: p.a, b: p.b}));
       body.appendChild(tr);
+      if (selected) body.appendChild(interfaceDetail(p, BPV.models[state.model], head.length));
     });
 }
 
@@ -610,7 +661,7 @@ async function showModel(i) {
   try {
     const m = await modelData(i);
     if (state.model !== i) return;
-    drawPae(); drawSeq();
+    drawPae(); drawSeq(); drawTable();
     if (Mol.ready) { const before = Mol.shown;
       await Mol.load(i, m); if (state.model !== i) return;
       await Mol.copyStyle(before, i); if (state.model !== i) return;
