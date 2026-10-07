@@ -180,11 +180,16 @@ const Mol = {
     await this.color(i, state.color);
     if (Object.keys(this.refs).length === 1) { this.plugin.canvas3d.handleResize(); this.plugin.managers.camera.reset(); }
   },
+  // the parts of model i that take the page's coloring: not the sticks Mol* draws around a
+  // residue in focus, which keep Mol*'s colors by element
+  colored(s) {
+    return s.components.filter(c => !(c.cell.transform.tags || []).some(tag => tag.startsWith('structure-focus')));
+  },
   themeName(i, mode) { return mode === 'plddt' ? 'bpv-plddt-' + i : 'bpv-chain'; },
   async color(i, mode) {
     const s = this.structure(i);
     if (s) await this.plugin.managers.structure.component.updateRepresentationsTheme(
-      s.components, {color: this.themeName(i, mode)});
+      this.colored(s), {color: this.themeName(i, mode)});
   },
   // color again every model that has a representation not in the page's coloring
   async recolor() {
@@ -193,7 +198,7 @@ const Mol = {
     try {
       for (const i in this.refs) {
         const s = this.structure(+i), name = this.themeName(+i, state.color);
-        if (s && s.components.some(c => c.representations.some(r => r.cell.transform.params.colorTheme.name !== name)))
+        if (s && this.colored(s).some(c => c.representations.some(r => r.cell.transform.params.colorTheme.name !== name)))
           await this.color(+i, state.color);
       }
     } finally { this.recoloring = false; }
@@ -218,6 +223,15 @@ const Mol = {
     const loci = this.loci(i, residues);
     I.lociSelects.select({loci});
     if (zoom) this.plugin.managers.camera.focusLoci(loci, {extraRadius: 14});
+  },
+  // as a click on a residue in Mol*'s own sequence does: the residue and what surrounds it
+  // drawn as sticks, and the camera on it
+  focusResidue(i, chain, resi) {
+    if (!this.ready || !this.structure(i)) return;
+    const loci = this.loci(i, [{chain, resi: [resi]}]);
+    this.plugin.managers.interactivity.lociSelects.deselectAll();
+    this.plugin.managers.structure.focus.setFromLoci(loci);
+    this.plugin.managers.camera.focusLoci(loci);
   },
   highlightResidue(i, chain, resi) {
     if (!this.ready || !this.structure(i)) return;
@@ -437,8 +451,8 @@ $('seq').addEventListener('mouseleave', () => { tip.hidden = true; Mol.highlight
 $('seq').addEventListener('click', ev => { const r = seqResidue(ev);
   if (!r) return;
   state.sel = null; state.cell = null;
-  $('sel-note').textContent = chainLabel(chainById[r.chain]) + ': ' + r.letter + r.resi + ' marked.';
-  Mol.select(state.model, [{chain: r.chain, resi: [r.resi]}], false);
+  $('sel-note').textContent = chainLabel(chainById[r.chain]) + ': ' + r.letter + r.resi + ' in focus.';
+  Mol.focusResidue(state.model, r.chain, r.resi);
   drawNets(); drawPaeOverlay(); drawTable(); drawSeq(); });
 // the residue under the pointer in the structure, marked in the sequences and brought into view
 function markSeq(r) {
@@ -610,6 +624,14 @@ function setup() {
   document.querySelectorAll('input[name=color]').forEach(r => r.addEventListener('change', async () => {
     state.color = r.value; drawSeq(); for (const i in Mol.refs) await Mol.color(+i, state.color); }));
   window.addEventListener('resize', () => { drawNets(); drawPaeOverlay(); });
+  // the two layouts: everything side by side, or the structure across the page; the choice is kept
+  const wide = on => { document.body.classList.toggle('wide', on); $('wide').textContent = on ? 'Side by side' : 'Wide structure';
+    try { localStorage.setItem('bpv-wide', on ? '1' : ''); } catch (e) { /* a page opened from a file may have no storage */ }
+    drawNets(); drawPaeOverlay(); };
+  let startWide = false;
+  try { startWide = localStorage.getItem('bpv-wide') === '1'; } catch (e) { /* as above */ }
+  wide(startWide);
+  $('wide').addEventListener('click', () => wide(!document.body.classList.contains('wide')));
   Mol.onRotate = R => { state.R = R; drawNets(); };
   Mol.onResidue = (kind, r) => {
     if (kind === 'hover') { const chain = r ? r.chain : null;

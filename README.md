@@ -179,8 +179,9 @@ Open `results/viewer/index.html` in a browser. It shows:
   colored by chain or by pLDDT, with a button per
   model (the models are superposed on the first one, so the view holds still when you switch);
 * the sequence of every chain below the structure, colored as the structure is. Pointing at a
-  letter highlights the residue in the structure, and the other way round; the interface
-  residues of the selected pair are bold and underlined;
+  letter highlights the residue in the structure, and the other way round; a click moves the
+  view to the residue and draws it and its surroundings as sticks, as Mol\*'s own sequence
+  panel does; the interface residues of the selected pair are bold and underlined;
 * the three network panels of the figure, with each protein at the centre of its chain(s): they
   turn as the structure is turned. In the model panel a line's width is the number of models that
   have the contact;
@@ -188,6 +189,9 @@ Open `results/viewer/index.html` in a browser. It shows:
 * a table of the protein pairs: in how many models each is a contact, its score in the model
   shown, and whether BioPlex detected it. Clicking a pair (or its line in a network) marks its
   interface residues in the structure and its blocks in the heatmap.
+
+All panels are side by side; the button "Wide structure" puts the structure across the page
+with the other panels below it, and the page remembers the choice.
 
 Each contact-rule button shows how many protein pairs are a contact in at least one model under
 that rule. If the rule in use finds none and another rule does, a line under the controls says so.
