@@ -143,7 +143,7 @@ const Mol = {
     if (window.ResizeObserver) new ResizeObserver(() => plugin.canvas3d && plugin.canvas3d.handleResize()).observe(element);
     // a representation added or changed in Mol*'s own controls comes with Mol*'s coloring:
     // give it the page's
-    plugin.managers.structure.hierarchy.behaviors.selection.subscribe(() => setTimeout(() => this.recolor(), 0));
+    plugin.managers.structure.hierarchy.behaviors.selection.subscribe(() => setTimeout(() => { this.hideOthers(); this.recolor(); }, 0));
     this.ready = true;
     emit();
   },
@@ -205,7 +205,48 @@ const Mol = {
   },
   show(i) {
     const H = this.plugin.managers.structure.hierarchy;
+    this.shown = i;
     for (const j in this.refs) { const s = this.structure(+j); if (s) H.toggleVisibility([s], +j === i ? 'show' : 'hide'); }
+  },
+  // what Mol*'s controls make anew (a preset replaces every component, in every model) is
+  // visible: hide it again in the models that are not shown
+  hideOthers() {
+    if (this.loading || this.shown == null) return;
+    const H = this.plugin.managers.structure.hierarchy;
+    for (const j in this.refs) { const s = this.structure(+j);
+      if (s && +j !== this.shown && s.components.some(c => !c.cell.state.isHidden || c.representations.some(r => !r.cell.state.isHidden)))
+        H.toggleVisibility([s], 'hide'); }
+  },
+  // The components and representations under model i, as Mol* holds them: (transformer,
+  // parameters, tags), nested. The sticks around a residue in focus are left out.
+  style(i) {
+    const data = this.plugin.state.data;
+    const walk = ref => data.tree.children.get(ref).toArray().map(r => data.cells.get(r))
+      .filter(c => c && !(c.transform.tags || []).some(tag => tag.startsWith('structure-focus')))
+      .map(c => ({ref: c.transform.ref, transformer: c.transform.transformer, params: c.transform.params,
+                  tags: c.transform.tags, children: walk(c.transform.ref)}));
+    return walk(this.refs[i]);
+  },
+  styleKey(nodes) {
+    return JSON.stringify(nodes.map(n => [n.transformer.id, Object.assign({}, n.params, {colorTheme: null}), this.styleKey(n.children)]));
+  },
+  // Give model `to` the style of model `from`. A change made in Mol*'s controls reaches the
+  // models that are loaded; one loaded later, or changed alone, would look different.
+  async copyStyle(from, to) {
+    if (from == null || from === to || !this.refs[from] || !this.refs[to]) return;
+    let want, have;
+    try { want = this.style(from); have = this.style(to); if (this.styleKey(want) === this.styleKey(have)) return; }
+    catch (e) { return; }
+    this.loading = true;
+    try {
+      const build = this.plugin.build();
+      have.forEach(n => build.delete(n.ref));
+      const add = (parent, nodes) => nodes.forEach(n => add(build.to(parent).apply(n.transformer, n.params, {tags: n.tags}).ref, n.children));
+      add(this.refs[to], want);
+      await build.commit();
+    } catch (e) { console.warn('style of model ' + from + ' not copied to model ' + to + ': ' + e); }
+    finally { this.loading = false; }
+    await this.color(to, state.color);
   },
   // residues: [{chain, resi: [numbers]}], of model i
   loci(i, residues) {
@@ -570,7 +611,10 @@ async function showModel(i) {
     const m = await modelData(i);
     if (state.model !== i) return;
     drawPae(); drawSeq();
-    if (Mol.ready) { await Mol.load(i, m); if (state.model !== i) return; Mol.show(i);
+    if (Mol.ready) { const before = Mol.shown;
+      await Mol.load(i, m); if (state.model !== i) return;
+      await Mol.copyStyle(before, i); if (state.model !== i) return;
+      Mol.show(i);
       Mol.select(i, interfaceOf(m, state.sel).residues, false); }
     selectionNote();
   } catch (e) { $('mol-message').hidden = false; $('mol-message').textContent = String(e.message || e); }
