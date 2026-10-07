@@ -103,7 +103,12 @@ function prepare(m) {
 const PLDDT_COLORS = [[90, 0x0053d6], [70, 0x65cbf3], [50, 0xffdb13], [-Infinity, 0xff7d45]];  // Mol*'s own
 const GREY = 0xb3b3b3;
 const Mol = {
-  ready: false, structures: {}, onRotate: null, onResidue: null,
+  ready: false, refs: {}, onRotate: null, onResidue: null,
+  // Model i as Mol* holds it now. Mol* makes these objects anew whenever its state changes (a
+  // representation added or changed in its own controls), so none is kept: only the reference.
+  structure(i) {
+    return this.plugin.managers.structure.hierarchy.current.structures.find(s => s.cell.transform.ref === this.refs[i]);
+  },
   async init(element) {
     if (!window.molstar) throw new Error('Mol* could not be loaded (it comes from cdn.jsdelivr.net, so the page needs a connection). The networks, the heatmap and the table work without it.');
     const viewer = this.viewer = await molstar.Viewer.create(element, {
@@ -136,6 +141,9 @@ const Mol = {
     viewer.subscribe(plugin.behaviors.interaction.click, e => { const r = residueOf(e.current.loci); if (r && this.onResidue) this.onResidue('click', r); });
     // the panel is sized by the page's layout, which can change after Mol* starts
     if (window.ResizeObserver) new ResizeObserver(() => plugin.canvas3d && plugin.canvas3d.handleResize()).observe(element);
+    // a representation added or changed in Mol*'s own controls comes with Mol*'s coloring:
+    // give it the page's
+    plugin.managers.structure.hierarchy.behaviors.selection.subscribe(() => setTimeout(() => this.recolor(), 0));
     this.ready = true;
     emit();
   },
@@ -149,9 +157,10 @@ const Mol = {
     this.plugin.representation.structure.themes.colorThemeRegistry.add(provider);
   },
   async load(i, m) {
-    if (this.structures[i]) return;
+    if (this.refs[i]) return;
     const H = this.plugin.managers.structure.hierarchy;
     const before = new Set(H.current.structures.map(s => s.cell.transform.ref));
+    this.loading = true;
     // cartoon for the chains whatever the size of the complex (Mol*'s own preset changes with
     // size), ball-and-stick for ligands and ions
     const B = this.plugin.builders;
@@ -162,32 +171,46 @@ const Mol = {
       const component = await B.structure.tryCreateComponentStatic(structure, part);
       if (component) await B.structure.representation.addRepresentation(component, {type, typeParams: {ignoreLight: true}, color: 'bpv-chain'});
     }
-    this.structures[i] = H.current.structures.find(s => !before.has(s.cell.transform.ref));
+    this.refs[i] = H.current.structures.find(s => !before.has(s.cell.transform.ref)).cell.transform.ref;
+    this.loading = false;
     this.addTheme('bpv-plddt-' + i, (chain, resi) => {
       const v = m.plddtOf[chain] && m.plddtOf[chain][resi];
       return v == null ? GREY : PLDDT_COLORS.find(([floor]) => v > floor)[1];
     });
     await this.color(i, state.color);
-    if (Object.keys(this.structures).length === 1) { this.plugin.canvas3d.handleResize(); this.plugin.managers.camera.reset(); }
+    if (Object.keys(this.refs).length === 1) { this.plugin.canvas3d.handleResize(); this.plugin.managers.camera.reset(); }
   },
+  themeName(i, mode) { return mode === 'plddt' ? 'bpv-plddt-' + i : 'bpv-chain'; },
   async color(i, mode) {
-    const s = this.structures[i];
+    const s = this.structure(i);
     if (s) await this.plugin.managers.structure.component.updateRepresentationsTheme(
-      s.components, {color: mode === 'plddt' ? 'bpv-plddt-' + i : 'bpv-chain'});
+      s.components, {color: this.themeName(i, mode)});
+  },
+  // color again every model that has a representation not in the page's coloring
+  async recolor() {
+    if (this.recoloring || this.loading) return;
+    this.recoloring = true;
+    try {
+      for (const i in this.refs) {
+        const s = this.structure(+i), name = this.themeName(+i, state.color);
+        if (s && s.components.some(c => c.representations.some(r => r.cell.transform.params.colorTheme.name !== name)))
+          await this.color(+i, state.color);
+      }
+    } finally { this.recoloring = false; }
   },
   show(i) {
     const H = this.plugin.managers.structure.hierarchy;
-    for (const j in this.structures) H.toggleVisibility([this.structures[j]], +j === i ? 'show' : 'hide');
+    for (const j in this.refs) { const s = this.structure(+j); if (s) H.toggleVisibility([s], +j === i ? 'show' : 'hide'); }
   },
   // residues: [{chain, resi: [numbers]}], of model i
   loci(i, residues) {
     const chains = [], numbers = [];
     residues.forEach(r => r.resi.forEach(n => { chains.push(r.chain); numbers.push(n); }));
-    return this.S.StructureElement.Loci.fromSchema(this.structures[i].cell.obj.data,
+    return this.S.StructureElement.Loci.fromSchema(this.structure(i).cell.obj.data,
       {items: {auth_asym_id: chains, auth_seq_id: numbers}});
   },
   select(i, residues, zoom) {
-    if (!this.ready || !this.structures[i]) return;
+    if (!this.ready || !this.structure(i)) return;
     const I = this.plugin.managers.interactivity;
     I.lociSelects.deselectAll();
     this.plugin.managers.structure.focus.clear();
@@ -197,11 +220,11 @@ const Mol = {
     if (zoom) this.plugin.managers.camera.focusLoci(loci, {extraRadius: 14});
   },
   highlightChains(i, chains) {
-    if (!this.ready || !this.structures[i]) return;
+    if (!this.ready || !this.structure(i)) return;
     const I = this.plugin.managers.interactivity;
     if (!chains || !chains.length) { I.lociHighlights.clearHighlights(); return; }
     I.lociHighlights.highlightOnly({loci: this.S.StructureElement.Loci.fromSchema(
-      this.structures[i].cell.obj.data, {items: {auth_asym_id: chains}})});
+      this.structure(i).cell.obj.data, {items: {auth_asym_id: chains}})});
   },
 };
 
@@ -517,7 +540,7 @@ function setup() {
     on.addEventListener('change', change); cut.addEventListener('input', change); text();
   }
   document.querySelectorAll('input[name=color]').forEach(r => r.addEventListener('change', async () => {
-    state.color = r.value; for (const i in Mol.structures) await Mol.color(+i, state.color); }));
+    state.color = r.value; for (const i in Mol.refs) await Mol.color(+i, state.color); }));
   window.addEventListener('resize', () => { drawNets(); drawPaeOverlay(); });
   Mol.onRotate = R => { state.R = R; drawNets(); };
   Mol.onResidue = (kind, r) => {
