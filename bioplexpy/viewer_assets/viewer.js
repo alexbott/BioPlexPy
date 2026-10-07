@@ -515,10 +515,21 @@ function setup() {
     : N + ' model' + (N === 1 ? '' : 's') + ' of one prediction' + (job.tool ? ' (' + ({boltz: 'Boltz', af3: 'AlphaFold3', colabfold: 'ColabFold'}[job.tool] || job.tool) + ')' : '') + '.';
   const ruleText = c => (c.contact_atoms === 'ca' ? 'C\u03b1 atoms' : 'any two atoms') + ' closer than ' + c.distance + ' \u00c5'
     + (c.min_plddt != null ? ', pLDDT at least ' + c.min_plddt : '') + (c.max_pae != null ? ', PAE at most ' + c.max_pae + ' \u00c5' : '');
-  // one button per rule, like the model buttons; the rule itself is in the button's tooltip
+  // one button per rule, like the model buttons, with the number of protein pairs that are a
+  // contact in some model under it; the rule itself is in the button's tooltip
+  const called = r => r.pairs.filter(p => p.n_contact > 0).length;
+  const pairsText = n => n + ' protein pair' + (n === 1 ? '' : 's');
+  // said outright when the rule in use finds no contact and another rule does
+  const ruleNote = () => { const more = called(rule) ? [] : job.rules.filter(r => called(r));
+    $('rule-note').hidden = !more.length;
+    $('rule-note').textContent = !more.length ? '' : 'No protein pair is a contact under the rule ' + rule.label + '. '
+      + more.map(r => 'Under ' + r.label + ', ' + pairsText(called(r)) + (called(r) === 1 ? ' is' : ' are')).join('; ')
+      + ': choose the contact rule above to see ' + (more.length === 1 && called(more[0]) === 1 ? 'it' : 'them') + '.'; };
+  ruleNote();
   job.rules.forEach((r, i) => { const b = document.createElement('button');
-    b.textContent = r.label; b.title = 'A contact: ' + ruleText(r.contact); b.classList.toggle('on', i === 0);
-    b.addEventListener('click', () => { useRule(i);
+    b.textContent = r.label + ' (' + called(r) + ')';
+    b.title = 'A contact: ' + ruleText(r.contact) + '. ' + pairsText(called(r)) + ' in contact in at least one model.'; b.classList.toggle('on', i === 0);
+    b.addEventListener('click', () => { useRule(i); ruleNote();
       document.querySelectorAll('#rules button').forEach((x, j) => x.classList.toggle('on', j === i));
       Mol.select(state.model, interfaceOf(BPV.models[state.model], state.sel).residues, false);
       drawNets(); drawPaeOverlay(); drawTable(); selectionNote(); });

@@ -20,6 +20,7 @@ section { border: 1px solid var(--line); border-radius: 6px; padding: 8px; min-w
 #structure-panel { grid-row: span 2; display: flex; flex-direction: column; }
 #mol { position: relative; width: 100%; flex: 1 1 520px; min-height: 520px; }
 #mol-message { color: var(--muted); }
+#rule-note { margin: 8px 0 0; padding: 6px 10px; border: 1px solid #d4a72c; border-radius: 6px; background: #fff8c5; }
 .net canvas { width: 100%; height: 340px; display: block; cursor: pointer; }
 #pae-panel { grid-column: 2 / span 1; }
 #table-panel { grid-column: 3 / span 2; overflow: auto; max-height: 420px; }
