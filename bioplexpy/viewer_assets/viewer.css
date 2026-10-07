@@ -5,7 +5,13 @@ body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--ink);
 h1 { font-size: 18px; margin: 0; }
 h2 { font-size: 13px; margin: 0 0 4px; font-weight: 600; }
 h2 span { font-weight: 400; color: var(--muted); }
-#settings { margin: 2px 0 8px; color: var(--muted); }
+#settings { margin: 2px 0 6px; color: var(--muted); }
+/* the job in a few numbers; a number that counts pairs is a button that lists them */
+#overview { display: flex; flex-wrap: wrap; gap: 4px 26px; margin: 0 0 8px; }
+#overview .item .label { margin-right: 6px; }
+#overview button, #only-note button { padding: 0 5px; border: 1px solid var(--line); background: #fff; border-radius: 4px;
+                   cursor: pointer; font: inherit; color: var(--accent); }
+#overview button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 #controls { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: center; padding: 8px 10px;
             background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
 .group { display: inline-flex; align-items: center; gap: 6px; }

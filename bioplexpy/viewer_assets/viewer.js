@@ -27,6 +27,7 @@ const state = {
   scoreOn: job.filter.min_score != null && scoreName === job.filter.score,
   cut: job.filter.min_score != null ? job.filter.min_score : (job.filter.suggested != null ? job.filter.suggested : 0.3),
   sel: null,          // {a, b}: the selected protein pair
+  only: null,         // name of the overview count whose pairs alone are listed in the table
   cell: null,         // [row, column] of a clicked PAE cell
   hoverNode: null, hoverChain: null, hoverResidue: null,
   R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
@@ -584,6 +585,56 @@ function interfaceNumbers(p, i) {
   const turn = v => v && (p.a < p.b ? v : [v[1], v[0]]);
   return Object.assign({}, o, {residues: turn(o.residues), plddt: turn(o.plddt)});
 }
+/* ---------- overview ---------- */
+// The job in a few numbers, under the contact rule (and the score cutoff) in use. Each count of
+// protein pairs is a set of pair keys: a click lists those pairs alone in the table.
+function overviewSets() {
+  const N1 = N > 1, sets = {any: [], all: [], bp293: [], bpHct: [], missed: [], failing: []};
+  rule.pairs.forEach(p => { const k = key(p.a, p.b), n = count(k);
+    if (n > 0) { sets.any.push(k); if (n === N) sets.all.push(k); if (p.bp293) sets.bp293.push(k); if (p.bpHct) sets.bpHct.push(k); }
+    else {
+      if (p.bp293 || p.bpHct) sets.missed.push(k);
+      // residues close enough in some model, and a contact in none
+      if (job.models.some(m => { const o = m.interfaces && m.interfaces[rule.id][k]; return o && o.n_close > 0; })) sets.failing.push(k);
+    } });
+  return {sets, N1};
+}
+function drawOverview() {
+  const box = $('overview'), {sets, N1} = overviewSets();
+  const proteins = job.chains.filter(c => c.type === 'protein'), others = job.chains.length - proteins.length;
+  const residues = job.chains.reduce((n, c) => n + c.length, 0);
+  const range = name => { const v = job.models.map(m => m.scores[name]).filter(x => x != null);
+    if (!v.length) return null;
+    const lo = Math.min(...v), hi = Math.max(...v);
+    return lo.toFixed(2) + (hi.toFixed(2) !== lo.toFixed(2) ? '\u2013' + hi.toFixed(2) : ''); };
+  const scores = [['iptm', 'ipTM'], ['ptm', 'pTM']].filter(([name]) => proteins.length > 1 || name !== 'iptm')
+    .map(([name, label]) => range(name) ? label + ' ' + range(name) : null).filter(Boolean);
+  const pairs = n => n + ' pair' + (n === 1 ? '' : 's');
+  const button = (name, text, title) => '<button data-only="' + name + '" title="' + title + '"' + (state.only === name ? ' class="on"' : '') + '>' + text + '</button>';
+  const item = (label, html) => '<span class="item"><span class="label">' + label + '</span>' + html + '</span>';
+  const items = [
+    item('Size', proteins.length + ' protein chain' + (proteins.length === 1 ? '' : 's') + (others ? ' and ' + others + ' other' : '') + ', '
+      + residues.toLocaleString('en-US') + ' residues, ' + N + ' model' + (N1 ? 's' : '')),
+    scores.length ? item('Confidence', scores.join(', ') + (N1 ? ' over the models' : '')) : '',
+    item('Contacts (' + rule.label + ')', button('any', pairs(sets.any.length), 'Protein pairs in contact' + (N1 ? ' in at least one model' : ''))
+      + (N1 ? ', ' + button('all', sets.all.length + ' in all ' + N + ' models', 'Protein pairs in contact in every model') : '')),
+    item('Detected by BioPlex', button('bp293', sets.bp293.length + ' in 293T', 'Pairs in contact that BioPlex detected in 293T') + ', '
+      + button('bpHct', sets.bpHct.length + ' in HCT116', 'Pairs in contact that BioPlex detected in HCT116') + ' of ' + sets.any.length
+      + '; ' + button('missed', sets.missed.length + ' not in contact', 'BioPlex interactions between these proteins that are not a contact in any model')),
+    job.models[0].interfaces ? item('Close, not a contact', button('failing', pairs(sets.failing.length),
+      'Pairs with residues close enough in some model that fail the rule in every model: see the columns Residue pairs and Failing')) : '',
+  ];
+  box.innerHTML = items.join('');
+  const names = {any: 'in contact', all: 'in contact in all models', bp293: 'in contact and detected in 293T', bpHct: 'in contact and detected in HCT116',
+    missed: 'BioPlex interactions that are not a contact', failing: 'close but not a contact'};
+  $('only-note').innerHTML = state.only ? '(' + names[state.only] + ' only) <button>show all</button>' : '';
+  return state.only ? new Set(sets[state.only]) : null;
+}
+$('overview').addEventListener('click', ev => { const b = ev.target.closest('button[data-only]');
+  if (!b) return;
+  state.only = state.only === b.dataset.only ? null : b.dataset.only; drawTable(); });
+$('only-note').addEventListener('click', ev => { if (ev.target.closest('button')) { state.only = null; drawTable(); } });
+
 const INTERFACE_HEAD = [
   ['Residue pairs', 'Pairs of residues that pass the contact rule, of those that are close enough (within the rule\'s distance)'],
   ['Failing', 'Close residue pairs that fail the rule\'s pLDDT condition, and its PAE condition; a pair can fail both'],
@@ -630,9 +681,11 @@ function drawTable() {
     INTERFACE_HEAD, [['293T'], ['HCT116']], job.has_reference ? [['Reference']] : []);
   document.querySelector('#pairs thead').innerHTML = '<tr>' + head.map(([h, title]) => '<th' + (title ? ' title="' + title + '"' : '') + '>' + h + '</th>').join('') + '</tr>';
   const body = document.querySelector('#pairs tbody'); body.textContent = '';
+  const only = drawOverview();
   if (!rule.pairs.length) { body.innerHTML = '<tr><td colspan="' + head.length + '">No pair of these proteins is a contact in a model or an interaction in BioPlex.</td></tr>'; return; }
+  if (only && !only.size) body.innerHTML = '<tr><td colspan="' + head.length + '">No such pair.</td></tr>';
   const yes = v => v ? 'yes' : '–';
-  rule.pairs.map(p => ({p, k: key(p.a, p.b)})).map(x => Object.assign(x, {n: count(x.k)}))
+  rule.pairs.map(p => ({p, k: key(p.a, p.b)})).filter(x => !only || only.has(x.k)).map(x => Object.assign(x, {n: count(x.k)}))
     .sort((x, y) => y.n - x.n).forEach(({p, k, n}) => {
       const tr = document.createElement('tr'), v = pairScore(p, state.model);
       const cells = [nodeById[p.a].label + ' – ' + nodeById[p.b].label, countText(k), yes(inModel(k, state.model))]

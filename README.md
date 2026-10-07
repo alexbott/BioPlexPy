@@ -209,6 +209,12 @@ Open `results/viewer/index.html` in a browser. It shows:
   a pair is *not* a contact ("0 of 229; 131 pLDDT, 229 PAE"). The selected pair opens to its
   residues: pLDDT, partners, nearest partner with distance and PAE; a click brings one into focus.
 
+Under the title, a line gives the job in a few numbers for the contact rule in use: its size, the
+models' ipTM and pTM, how many protein pairs are in contact (and in every model), how many of
+those BioPlex detected, how many BioPlex interactions are not a contact, and how many pairs
+have residues close enough but fail the rule. A click on a count lists those pairs alone in the
+table.
+
 All panels are side by side; the button "Wide structure" puts the structure across the page
 with the other panels below it, and the page remembers the choice.
 
